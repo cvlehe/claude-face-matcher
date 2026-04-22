@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FaceMatcher</string>
+    <string name="add_face">Add face in frame</string>
+    <string name="flip_camera">Flip</string>
+</resources>
