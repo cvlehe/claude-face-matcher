@@ -1,195 +1,326 @@
 package com.example.facematcher
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.text.InputType
-import android.widget.EditText
-import android.widget.Toast
+import android.os.IBinder
+import android.provider.Settings
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.example.facematcher.databinding.ActivityMainBinding
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
 
-    private lateinit var binding: ActivityMainBinding
-    private lateinit var cameraExecutor: ExecutorService
+    private var isBound = false
+    private var boundService: FaceDetectionService? = null
 
-    private var faceRecognizer: FaceRecognizer? = null
-    private lateinit var faceStorage: FaceStorage
+    private val isServiceRunning = mutableStateOf(false)
+    private val faceResults = mutableStateListOf<FaceAnalyzer.FaceResult>()
+    private val hasCameraPermission = mutableStateOf(false)
+    private val hasOverlayPermission = mutableStateOf(false)
+    private val hasNotificationPermission = mutableStateOf(false)
+    private val savedFaceCount = mutableIntStateOf(0)
 
-    @Volatile
-    private var lastFaceResults: List<FaceAnalyzer.FaceResult> = emptyList()
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val svc = (binder as FaceDetectionService.LocalBinder).getService()
+            boundService = svc
+            isBound = true
+            isServiceRunning.value = true
+            savedFaceCount.intValue = svc.faceStorage.size()
+            svc.onFaceResultsChanged = { results ->
+                faceResults.clear()
+                faceResults.addAll(results)
+                savedFaceCount.intValue = svc.faceStorage.size()
+            }
+        }
 
-    private val recentToasts = mutableMapOf<String, Long>()
-    private val toastCooldownMs = 3000L
-
-    private var lensFacing = CameraSelector.LENS_FACING_BACK
-
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            startCamera()
-        } else {
-            Toast.makeText(this, "Camera permission required.", Toast.LENGTH_LONG).show()
-            finish()
+        override fun onServiceDisconnected(name: ComponentName) {
+            boundService?.onFaceResultsChanged = null
+            boundService = null
+            isBound = false
         }
     }
+
+    private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
+    private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
-        faceStorage = FaceStorage(this)
+        cameraPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted -> hasCameraPermission.value = granted }
 
-        try {
-            faceRecognizer = FaceRecognizer(this)
-        } catch (e: Exception) {
-            AlertDialog.Builder(this)
-                .setTitle("Face model missing")
-                .setMessage(
-                    "Could not load ${FaceRecognizer.MODEL_FILE} from assets.\n\n" +
-                        "Place a FaceNet-512 TFLite model at:\n" +
-                        "app/src/main/assets/${FaceRecognizer.MODEL_FILE}\n\n" +
-                        "Expected input: ${FaceRecognizer.INPUT_SIZE}x${FaceRecognizer.INPUT_SIZE}x3, " +
-                        "output: ${FaceRecognizer.EMBEDDING_SIZE}-d embedding.\n\n" +
-                        "Error: ${e.message}"
-                )
-                .setCancelable(false)
-                .setPositiveButton("Exit") { _, _ -> finish() }
-                .show()
-            return
+        notificationPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted -> hasNotificationPermission.value = granted }
+
+        refreshPermissions()
+
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    ControlPanel(
+                        isRunning = isServiceRunning.value,
+                        hasCameraPermission = hasCameraPermission.value,
+                        hasOverlayPermission = hasOverlayPermission.value,
+                        hasNotificationPermission = hasNotificationPermission.value,
+                        faceResults = faceResults,
+                        savedFaceCount = savedFaceCount.intValue,
+                        onStartStop = { if (isServiceRunning.value) stopDetection() else startDetection() },
+                        onAddFace = { name ->
+                            val emb = faceResults
+                                .maxByOrNull { it.bbox.width() * it.bbox.height() }
+                                ?.embedding ?: return@ControlPanel
+                            boundService?.faceStorage?.addFace(name, emb)
+                            savedFaceCount.intValue = boundService?.faceStorage?.size()
+                                ?: savedFaceCount.intValue
+                        },
+                        onRequestCamera = {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        },
+                        onRequestNotification = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        },
+                        onRequestOverlay = {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        refreshPermissions()
+        if (FaceDetectionService.isRunning && !isBound) {
+            bindService(Intent(this, FaceDetectionService::class.java), serviceConnection, BIND_AUTO_CREATE)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-check after returning from system Settings
+        hasOverlayPermission.value = Settings.canDrawOverlays(this)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isBound) {
+            boundService?.onFaceResultsChanged = null
+            unbindService(serviceConnection)
+            isBound = false
+            boundService = null
+        }
+    }
+
+    private fun refreshPermissions() {
+        hasCameraPermission.value = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        hasOverlayPermission.value = Settings.canDrawOverlays(this)
+        hasNotificationPermission.value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else true
+    }
+
+    private fun startDetection() {
+        val intent = Intent(this, FaceDetectionService::class.java)
+        startForegroundService(intent)
+        if (!isBound) bindService(intent, serviceConnection, BIND_AUTO_CREATE)
+        isServiceRunning.value = true
+    }
+
+    private fun stopDetection() {
+        if (isBound) {
+            boundService?.onFaceResultsChanged = null
+            unbindService(serviceConnection)
+            isBound = false
+            boundService = null
+        }
+        stopService(Intent(this, FaceDetectionService::class.java))
+        isServiceRunning.value = false
+        faceResults.clear()
+        savedFaceCount.intValue = FaceStorage(this).size()
+    }
+}
+
+@Composable
+fun ControlPanel(
+    isRunning: Boolean,
+    hasCameraPermission: Boolean,
+    hasOverlayPermission: Boolean,
+    hasNotificationPermission: Boolean,
+    faceResults: List<FaceAnalyzer.FaceResult>,
+    savedFaceCount: Int,
+    onStartStop: () -> Unit,
+    onAddFace: (String) -> Unit,
+    onRequestCamera: () -> Unit,
+    onRequestNotification: () -> Unit,
+    onRequestOverlay: () -> Unit
+) {
+    var showAddDialog by remember { mutableStateOf(false) }
+    var dialogName by remember { mutableStateOf("") }
+
+    val canStart = hasCameraPermission && hasOverlayPermission && hasNotificationPermission
+    val largestFace = faceResults.maxByOrNull { it.bbox.width() * it.bbox.height() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text("Face Matcher", style = MaterialTheme.typography.headlineMedium)
+
+        HorizontalDivider()
+
+        if (!hasCameraPermission) {
+            PermissionRow("Camera access required", "Grant", onRequestCamera)
+        }
+        if (!hasNotificationPermission) {
+            PermissionRow("Notification permission required", "Grant", onRequestNotification)
+        }
+        if (!hasOverlayPermission) {
+            PermissionRow("Overlay permission required for AR name display", "Grant", onRequestOverlay)
         }
 
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        HorizontalDivider()
 
-        binding.addFaceButton.setOnClickListener { onAddFaceClicked() }
-        binding.flipCameraButton.setOnClickListener { flipCamera() }
+        Text(
+            text = if (isRunning) "Active — watching for faces" else "Stopped",
+            color = if (isRunning) Color(0xFF4CAF50) else Color.Gray,
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Text("Saved faces: $savedFaceCount", fontSize = 14.sp, color = Color.Gray)
 
-        updateStatus(emptyList())
+        if (isRunning) {
+            val names = faceResults.mapNotNull { it.matchName }
+            Text(
+                text = "In frame: ${faceResults.size}" +
+                    if (names.isNotEmpty()) " · Recognized: ${names.joinToString(", ")}" else "",
+                fontSize = 14.sp,
+                color = Color.Gray
+            )
+        }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED
+        Spacer(Modifier.height(4.dp))
+
+        Button(
+            onClick = onStartStop,
+            enabled = canStart || isRunning,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isRunning) Color(0xFFB00020) else MaterialTheme.colorScheme.primary
+            )
         ) {
-            startCamera()
-        } else {
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+            Text(if (isRunning) "Stop" else "Start")
         }
-    }
 
-    private fun startCamera() {
-        val recognizer = faceRecognizer ?: return
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
-
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(binding.previewView.surfaceProvider)
-            }
-
-            val analyzer = FaceAnalyzer(recognizer, faceStorage) { results ->
-                onFaceResults(results)
-            }
-
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also { it.setAnalyzer(cameraExecutor, analyzer) }
-
-            val cameraSelector = CameraSelector.Builder()
-                .requireLensFacing(lensFacing)
-                .build()
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
-            } catch (e: Exception) {
-                Toast.makeText(this, "Camera bind failed: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun flipCamera() {
-        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-            CameraSelector.LENS_FACING_FRONT
-        } else {
-            CameraSelector.LENS_FACING_BACK
-        }
-        startCamera()
-    }
-
-    private fun onFaceResults(results: List<FaceAnalyzer.FaceResult>) {
-        lastFaceResults = results
-        runOnUiThread {
-            val now = System.currentTimeMillis()
-            for (r in results) {
-                val name = r.matchName ?: continue
-                val last = recentToasts[name] ?: 0L
-                if (now - last > toastCooldownMs) {
-                    recentToasts[name] = now
-                    Toast.makeText(this, name, Toast.LENGTH_SHORT).show()
+        OutlinedButton(
+            onClick = { dialogName = ""; showAddDialog = true },
+            enabled = isRunning && largestFace != null,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                when {
+                    !isRunning -> "Start detection to add a face"
+                    largestFace == null -> "No face in frame"
+                    else -> "Remember this face…"
                 }
-            }
-            updateStatus(results)
+            )
         }
     }
 
-    private fun updateStatus(results: List<FaceAnalyzer.FaceResult>) {
-        val count = results.size
-        val saved = faceStorage.size()
-        val matches = results.mapNotNull { it.matchName }
-        val matchText = if (matches.isNotEmpty()) " | Seen: ${matches.joinToString(", ")}" else ""
-        binding.statusText.text = "In frame: $count | Saved: $saved$matchText"
-    }
-
-    private fun onAddFaceClicked() {
-        val results = lastFaceResults
-        if (results.isEmpty()) {
-            Toast.makeText(
-                this,
-                "No face detected. Point the camera at a face and try again.",
-                Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-        val face = results.maxBy { it.bbox.width() * it.bbox.height() }
-        val embedding = face.embedding
-
-        val input = EditText(this).apply {
-            hint = "Name"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Save face")
-            .setMessage("Enter the name of the person in the frame.")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isEmpty()) {
-                    Toast.makeText(this, "Name cannot be empty.", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("Remember face") },
+            text = {
+                Column {
+                    Text("Enter the name of the person currently in frame.")
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = dialogName,
+                        onValueChange = { dialogName = it },
+                        label = { Text("Name") },
+                        singleLine = true
+                    )
                 }
-                faceStorage.addFace(name, embedding)
-                Toast.makeText(this, "Saved: $name", Toast.LENGTH_SHORT).show()
-                updateStatus(lastFaceResults)
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val name = dialogName.trim()
+                    if (name.isNotEmpty()) {
+                        onAddFace(name)
+                        showAddDialog = false
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) { Text("Cancel") }
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        )
     }
+}
 
-    override fun onDestroy() {
-        super.onDestroy()
-        if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
-        faceRecognizer?.close()
+@Composable
+fun PermissionRow(label: String, buttonLabel: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, color = Color(0xFFFF9800))
+        TextButton(onClick = onClick) { Text(buttonLabel) }
     }
 }
