@@ -1,6 +1,13 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val localProperties = Properties().also { props ->
+    rootProject.file("local.properties").takeIf { it.exists() }
+        ?.inputStream()?.use { props.load(it) }
 }
 
 android {
@@ -13,6 +20,11 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField(
+            "String", "GEMINI_API_KEY",
+            "\"${localProperties.getProperty("geminiApiKey", "")}\""
+        )
     }
 
     buildTypes {
@@ -36,6 +48,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -83,4 +96,7 @@ dependencies {
 
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // Gemini for context-aware name detection
+    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
 }

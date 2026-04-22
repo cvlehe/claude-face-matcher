@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
     private val hasCameraPermission = mutableStateOf(false)
     private val hasOverlayPermission = mutableStateOf(false)
     private val hasNotificationPermission = mutableStateOf(false)
+    private val hasAudioPermission = mutableStateOf(false)
     private val savedFaceCount = mutableIntStateOf(0)
 
     private val serviceConnection = object : ServiceConnection {
@@ -82,6 +83,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
+    private lateinit var audioPermissionLauncher: ActivityResultLauncher<String>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +96,10 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.RequestPermission()
         ) { granted -> hasNotificationPermission.value = granted }
 
+        audioPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted -> hasAudioPermission.value = granted }
+
         refreshPermissions()
 
         setContent {
@@ -104,6 +110,7 @@ class MainActivity : ComponentActivity() {
                         hasCameraPermission = hasCameraPermission.value,
                         hasOverlayPermission = hasOverlayPermission.value,
                         hasNotificationPermission = hasNotificationPermission.value,
+                        hasAudioPermission = hasAudioPermission.value,
                         faceResults = faceResults,
                         savedFaceCount = savedFaceCount.intValue,
                         onStartStop = { if (isServiceRunning.value) stopDetection() else startDetection() },
@@ -130,6 +137,9 @@ class MainActivity : ComponentActivity() {
                                     Uri.parse("package:$packageName")
                                 )
                             )
+                        },
+                        onRequestAudio = {
+                            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         }
                     )
                 }
@@ -171,6 +181,9 @@ class MainActivity : ComponentActivity() {
                 this, Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
         } else true
+        hasAudioPermission.value = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun startDetection() {
@@ -200,18 +213,20 @@ fun ControlPanel(
     hasCameraPermission: Boolean,
     hasOverlayPermission: Boolean,
     hasNotificationPermission: Boolean,
+    hasAudioPermission: Boolean,
     faceResults: List<FaceAnalyzer.FaceResult>,
     savedFaceCount: Int,
     onStartStop: () -> Unit,
     onAddFace: (String) -> Unit,
     onRequestCamera: () -> Unit,
     onRequestNotification: () -> Unit,
-    onRequestOverlay: () -> Unit
+    onRequestOverlay: () -> Unit,
+    onRequestAudio: () -> Unit
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var dialogName by remember { mutableStateOf("") }
 
-    val canStart = hasCameraPermission && hasOverlayPermission && hasNotificationPermission
+    val canStart = hasCameraPermission && hasOverlayPermission && hasNotificationPermission && hasAudioPermission
     val largestFace = faceResults.maxByOrNull { it.bbox.width() * it.bbox.height() }
 
     Column(
@@ -229,6 +244,9 @@ fun ControlPanel(
         }
         if (!hasNotificationPermission) {
             PermissionRow("Notification permission required", "Grant", onRequestNotification)
+        }
+        if (!hasAudioPermission) {
+            PermissionRow("Microphone required for automatic name detection", "Grant", onRequestAudio)
         }
         if (!hasOverlayPermission) {
             PermissionRow("Overlay permission required for AR name display", "Grant", onRequestOverlay)

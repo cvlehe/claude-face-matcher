@@ -49,6 +49,7 @@ class FaceDetectionService : LifecycleService() {
 
     private var faceRecognizer: FaceRecognizer? = null
     lateinit var faceStorage: FaceStorage
+    private var nameDetector: NameDetector? = null
 
     private var overlayView: TextView? = null
     private val recentRecognitions = mutableMapOf<String, Long>()
@@ -68,12 +69,25 @@ class FaceDetectionService : LifecycleService() {
         faceStorage = FaceStorage(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
         faceRecognizer = try { FaceRecognizer(this) } catch (_: Exception) { null }
+        if (BuildConfig.GEMINI_API_KEY.isNotBlank()) {
+            nameDetector = NameDetector(this, BuildConfig.GEMINI_API_KEY) { name ->
+                val embedding = lastFaceResults
+                    .maxByOrNull { it.bbox.width() * it.bbox.height() }
+                    ?.embedding ?: return@NameDetector
+                faceStorage.addFace(name, embedding)
+                showOverlay("Remembered: $name")
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+        startForeground(
+            NOTIFICATION_ID, buildNotification(),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        )
         startCamera()
+        nameDetector?.start()
         return START_STICKY
     }
 
@@ -193,6 +207,7 @@ class FaceDetectionService : LifecycleService() {
         super.onDestroy()
         isRunning = false
         mainHandler.removeCallbacks(hideOverlayRunnable)
+        nameDetector?.stop()
         cameraExecutor.shutdown()
         faceRecognizer?.close()
         removeOverlay()
