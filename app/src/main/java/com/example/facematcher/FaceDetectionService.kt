@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.widget.TextView
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -50,6 +51,7 @@ class FaceDetectionService : LifecycleService() {
     private var faceRecognizer: FaceRecognizer? = null
     lateinit var faceStorage: FaceStorage
     private var nameDetector: NameDetector? = null
+    private var cameraPreview: Preview? = null
 
     private var overlayView: TextView? = null
     private val recentRecognitions = mutableMapOf<String, Long>()
@@ -136,11 +138,20 @@ class FaceDetectionService : LifecycleService() {
                         }
                     })
                 }
+            val preview = Preview.Builder().build().also { cameraPreview = it }
             try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, imageAnalysis)
+                provider.bindToLifecycle(this, selector, imageAnalysis, preview)
             } catch (_: Exception) {}
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    fun attachPreviewSurface(surfaceProvider: Preview.SurfaceProvider) {
+        cameraPreview?.setSurfaceProvider(surfaceProvider)
+    }
+
+    fun detachPreviewSurface() {
+        cameraPreview?.setSurfaceProvider(null)
     }
 
     // XR emulator cameras report no lens-facing metadata, so fall back to the
