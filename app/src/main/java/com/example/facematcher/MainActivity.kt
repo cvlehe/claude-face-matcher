@@ -365,6 +365,18 @@ fun ControlPanel(
     }
 }
 
+@Composable
+fun PermissionRow(label: String, buttonLabel: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, color = Color(0xFFFF9800))
+        TextButton(onClick = onClick) { Text(buttonLabel) }
+    }
+}
+
 @Preview(showBackground = true, name = "Running — face recognized")
 @Composable
 private fun PreviewControlPanelRunning() {
@@ -404,18 +416,6 @@ private fun PreviewControlPanelStopped() {
                 onRequestOverlay = {}, onRequestAudio = {}
             )
         }
-    }
-}
-
-@Composable
-fun PermissionRow(label: String, buttonLabel: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, color = Color(0xFFFF9800))
-        TextButton(onClick = onClick) { Text(buttonLabel) }
     }
 }
 
