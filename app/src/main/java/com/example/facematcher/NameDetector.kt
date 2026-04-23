@@ -30,6 +30,7 @@ class NameDetector(
     private var speechRecognizer: SpeechRecognizer? = null
     private val recentPhrases = ArrayDeque<String>()
     private var isActive = false
+    private var isListening = false
 
     private val job = Job()
     private val scope = CoroutineScope(Dispatchers.IO + job)
@@ -50,15 +51,26 @@ class NameDetector(
     fun start() {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) return
         isActive = true
+        // Waits for resume() — called only when an unrecognised face is in frame.
+    }
+
+    fun resume() {
+        if (!isActive || isListening) return
+        isListening = true
         listen()
+    }
+
+    fun pause() {
+        isListening = false
+        speechRecognizer?.stopListening()
+        speechRecognizer?.destroy()
+        speechRecognizer = null
     }
 
     fun stop() {
         isActive = false
         job.cancel()
-        speechRecognizer?.stopListening()
-        speechRecognizer?.destroy()
-        speechRecognizer = null
+        pause()
     }
 
     private fun listen() {
@@ -86,7 +98,7 @@ class NameDetector(
             val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull().orEmpty()
             if (text.isNotBlank()) processPhrase(text)
-            if (isActive) mainHandler.post { listen() }
+            if (isListening) mainHandler.post { listen() }
         }
 
         override fun onError(error: Int) {
@@ -95,7 +107,7 @@ class NameDetector(
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> return // stop retrying
                 else -> 300L
             }
-            if (isActive) mainHandler.postDelayed({ listen() }, retryDelayMs)
+            if (isListening) mainHandler.postDelayed({ listen() }, retryDelayMs)
         }
 
         override fun onReadyForSpeech(params: Bundle?) {}
