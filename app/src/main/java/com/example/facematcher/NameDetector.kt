@@ -2,6 +2,7 @@ package com.example.facematcher
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -27,6 +28,7 @@ class NameDetector(
     private val onNameDetected: (String) -> Unit
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var speechRecognizer: SpeechRecognizer? = null
     private val recentPhrases = ArrayDeque<String>()
     private var isActive = false
@@ -56,11 +58,14 @@ class NameDetector(
     fun stop() {
         isActive = false
         job.cancel()
+        speechRecognizer?.stopListening()
         speechRecognizer?.destroy()
         speechRecognizer = null
+        audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
     }
 
     private fun listen() {
+        audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0)
         speechRecognizer?.destroy()
         val recognizer = if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context))
             SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
@@ -81,6 +86,7 @@ class NameDetector(
 
     private val recognitionListener = object : RecognitionListener {
         override fun onResults(results: Bundle) {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
             val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull().orEmpty()
             if (text.isNotBlank()) processPhrase(text)
@@ -88,6 +94,7 @@ class NameDetector(
         }
 
         override fun onError(error: Int) {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
             val retryDelayMs = when (error) {
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 1000L
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> return // stop retrying
@@ -96,11 +103,15 @@ class NameDetector(
             if (isActive) mainHandler.postDelayed({ listen() }, retryDelayMs)
         }
 
-        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onReadyForSpeech(params: Bundle?) {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_UNMUTE, 0)
+        }
+        override fun onEndOfSpeech() {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, AudioManager.ADJUST_MUTE, 0)
+        }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
         override fun onPartialResults(partialResults: Bundle?) {}
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }

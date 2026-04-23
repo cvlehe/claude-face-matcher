@@ -114,6 +114,11 @@ class MainActivity : ComponentActivity() {
                         faceResults = faceResults,
                         savedFaceCount = savedFaceCount.intValue,
                         onStartStop = { if (isServiceRunning.value) stopDetection() else startDetection() },
+                        onClearFaces = {
+                            boundService?.faceStorage?.clearAll()
+                                ?: FaceStorage(this).clearAll()
+                            savedFaceCount.intValue = 0
+                        },
                         onAddFace = { name ->
                             val emb = faceResults
                                 .maxByOrNull { it.bbox.width() * it.bbox.height() }
@@ -218,12 +223,14 @@ fun ControlPanel(
     savedFaceCount: Int,
     onStartStop: () -> Unit,
     onAddFace: (String) -> Unit,
+    onClearFaces: () -> Unit,
     onRequestCamera: () -> Unit,
     onRequestNotification: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestAudio: () -> Unit
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
+    var showClearDialog by remember { mutableStateOf(false) }
     var dialogName by remember { mutableStateOf("") }
 
     val canStart = hasCameraPermission && hasOverlayPermission && hasNotificationPermission && hasAudioPermission
@@ -297,6 +304,34 @@ fun ControlPanel(
                 }
             )
         }
+
+        OutlinedButton(
+            onClick = { showClearDialog = true },
+            enabled = savedFaceCount > 0,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = Color(0xFFB00020)
+            )
+        ) {
+            Text("Delete all saved faces")
+        }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("Delete all faces?") },
+            text = { Text("This will permanently remove all $savedFaceCount saved face${if (savedFaceCount == 1) "" else "s"}. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onClearFaces()
+                    showClearDialog = false
+                }) { Text("Delete", color = Color(0xFFB00020)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 
     if (showAddDialog) {

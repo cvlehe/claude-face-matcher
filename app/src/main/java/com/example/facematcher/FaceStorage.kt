@@ -41,6 +41,12 @@ class FaceStorage(context: Context) {
     @Synchronized
     fun size(): Int = faces.size
 
+    @Synchronized
+    fun clearAll() {
+        faces.clear()
+        file.delete()
+    }
+
     private fun l2Distance(a: FloatArray, b: FloatArray): Float {
         var sum = 0f
         for (i in a.indices) {
