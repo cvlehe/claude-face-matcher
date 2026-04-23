@@ -365,6 +365,48 @@ fun ControlPanel(
     }
 }
 
+@Preview(showBackground = true, name = "Running — face recognized")
+@Composable
+private fun PreviewControlPanelRunning() {
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            ControlPanel(
+                isRunning = true,
+                hasCameraPermission = true,
+                hasOverlayPermission = true,
+                hasNotificationPermission = true,
+                hasAudioPermission = true,
+                faceResults = emptyList(),
+                savedFaceCount = 3,
+                onStartStop = {}, onAddFace = {}, onClearFaces = {},
+                onRequestCamera = {}, onRequestNotification = {},
+                onRequestOverlay = {}, onRequestAudio = {}
+            )
+        }
+    }
+}
+
+@Preview(showBackground = true, name = "Stopped — missing permissions")
+@Composable
+private fun PreviewControlPanelStopped() {
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            ControlPanel(
+                isRunning = false,
+                hasCameraPermission = false,
+                hasOverlayPermission = false,
+                hasNotificationPermission = false,
+                hasAudioPermission = false,
+                faceResults = emptyList(),
+                savedFaceCount = 0,
+                onStartStop = {}, onAddFace = {}, onClearFaces = {},
+                onRequestCamera = {}, onRequestNotification = {},
+                onRequestOverlay = {}, onRequestAudio = {}
+            )
+        }
+    }
+}
+
 @Composable
 fun PermissionRow(label: String, buttonLabel: String, onClick: () -> Unit) {
     Row(
@@ -374,5 +416,13 @@ fun PermissionRow(label: String, buttonLabel: String, onClick: () -> Unit) {
     ) {
         Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, color = Color(0xFFFF9800))
         TextButton(onClick = onClick) { Text(buttonLabel) }
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun PreviewPermissionRow() {
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        PermissionRow("Camera access required", "Grant", {})
     }
 }
