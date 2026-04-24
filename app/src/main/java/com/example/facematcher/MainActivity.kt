@@ -89,6 +89,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        savedFaceCount.intValue = FaceStorage(this).size()
+
         cameraPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted -> hasCameraPermission.value = granted }
