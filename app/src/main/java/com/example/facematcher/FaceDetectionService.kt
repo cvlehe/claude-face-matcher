@@ -57,6 +57,11 @@ class FaceDetectionService : LifecycleService() {
     private val recentRecognitions = mutableMapOf<String, Long>()
     private val hideOverlayRunnable = Runnable { removeOverlay() }
 
+    // Debounce mic pause: require this many consecutive all-recognised frames before
+    // stopping the mic, so brief recognition fluctuations don't cause audible clicks.
+    private var allRecognizedFrames = 0
+    private val pauseAfterFrames = 6
+
     @Volatile
     var lastFaceResults: List<FaceAnalyzer.FaceResult> = emptyList()
         private set
@@ -90,7 +95,6 @@ class FaceDetectionService : LifecycleService() {
         )
         startCamera()
         nameDetector?.start()
-        nameDetector?.resume()
         return START_STICKY
     }
 
@@ -177,6 +181,12 @@ class FaceDetectionService : LifecycleService() {
         }
         if (newNames.isNotEmpty()) showOverlay(newNames.joinToString(" · "))
 
+        if (results.any { it.matchName == null }) {
+            allRecognizedFrames = 0
+            nameDetector?.resume()
+        } else {
+            if (++allRecognizedFrames >= pauseAfterFrames) nameDetector?.pause()
+        }
     }
 
     private fun showOverlay(text: String) {
