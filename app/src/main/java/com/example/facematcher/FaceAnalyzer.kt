@@ -33,14 +33,18 @@ class FaceAnalyzer(
 
     @Volatile
     private var processing = false
+    private var lastAnalysisMs = 0L
+    private val minIntervalMs = 500L
 
     @ExperimentalGetImage
     override fun analyze(imageProxy: ImageProxy) {
-        if (processing) {
+        val now = System.currentTimeMillis()
+        if (processing || now - lastAnalysisMs < minIntervalMs) {
             imageProxy.close()
             return
         }
         processing = true
+        lastAnalysisMs = now
 
         val rotation = imageProxy.imageInfo.rotationDegrees
         val bitmap: Bitmap = try {
@@ -61,17 +65,13 @@ class FaceAnalyzer(
                 val results = faces.mapNotNull { face ->
                     val clamped = clampRect(face.boundingBox, rotated.width, rotated.height)
                     if (clamped.width() < 16 || clamped.height() < 16) return@mapNotNull null
+
                     val cropped = try {
-                        Bitmap.createBitmap(
-                            rotated,
-                            clamped.left,
-                            clamped.top,
-                            clamped.width(),
-                            clamped.height()
-                        )
+                        Bitmap.createBitmap(rotated, clamped.left, clamped.top, clamped.width(), clamped.height())
                     } catch (e: Exception) {
                         return@mapNotNull null
                     }
+
                     val embedding = recognizer.getEmbedding(cropped)
                     val match = storage.findBestMatch(embedding)
                     FaceResult(
