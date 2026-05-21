@@ -8,6 +8,7 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import com.google.mlkit.genai.common.FeatureStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import com.google.mlkit.genai.prompt.Generation
 import kotlin.properties.Delegates
 
 /**
@@ -170,69 +172,103 @@ class NameDetector(
         }
     }
 
-    private suspend fun askGemini(latestPhrase: String, previous: String?): String? =
-        withContext(Dispatchers.IO) {
-            try {
-                val prompt = """
-                    You are analysing ambient speech captured by a wearable device. The transcript may mix speech from multiple people — a question from one person and an answer from another can appear in the same phrase. Recognition delays also mean phrases can arrive slightly out of chronological order.
+    private fun buildPrompt(latestPhrase: String, previous: String?) = """
+        You are analysing ambient speech captured by a wearable device. The transcript may mix
+        speech from multiple people — a question from one person and an answer from another can
+        appear in the same phrase. Recognition delays also mean phrases can arrive slightly out
+        of chronological order.
 
-                    Previous transcript segment: "$previous"
-                    Latest transcript segment: "$latestPhrase"
+        Previous transcript segment: "$previous"
+        Latest transcript segment: "$latestPhrase"
 
-                    Task: extract the first name of the person who was introduced or who introduced themselves. This includes:
-                    - Direct introductions: "I'm Joe", "My name is Joe", "Call me Joe"
-                    - A name question ("what's your name", "your name", "who are you") appearing near a short word that is plausibly a first name — even if the name appears just before the question due to recognition delay, treat it as the answer
-                    - The pattern "What's your name [Name]" means [Name] is the answer
+        Task: extract the first name of the person who was introduced or who introduced
+        themselves. This includes:
+        - Direct introductions: "I'm Joe", "My name is Joe", "Call me Joe"
+        - A name question ("what's your name", "your name", "who are you") appearing near a
+          short word that is plausibly a first name — even if the name appears just before the
+          question due to recognition delay, treat it as the answer
+        - The pattern "What's your name [Name]" means [Name] is the answer
 
-                    Reply with ONLY the first name (capitalised) if found, or exactly NONE if no name was stated.
-                """.trimIndent()
-                previousPhrase = null
+        Reply with ONLY the first name (capitalised) if found, or exactly NONE if no name was stated.
+    """.trimIndent()
 
-                val requestBody = JSONObject().apply {
-                    put("contents", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("parts", JSONArray().apply {
-                                put(JSONObject().apply { put("text", prompt) })
-                            })
+    private fun String.isValidName() =
+        isNotBlank() && this != "NONE" && !contains(Regex("[\\n\\r.,!?]"))
+
+    private suspend fun askGemini(latestPhrase: String, previous: String?): String? {
+        val prompt = buildPrompt(latestPhrase, previous)
+        previousPhrase = null
+        return askGeminiNano(prompt) ?: askGeminiRest(prompt)
+    }
+
+    /** On-device inference via Gemini Nano — no network, no API key required. */
+    private suspend fun askGeminiNano(prompt: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val client = Generation.getClient()
+            val status = client.checkStatus()
+            if (status != FeatureStatus.AVAILABLE) {
+                println("cv-NANO: not available (status=$status)")
+                return@withContext null
+            }
+            val response = client.generateContent(prompt)
+            val result = response.candidates.firstOrNull()?.text?.trim() ?: return@withContext null
+            println("cv-NANO RESULT: $result")
+            if (result.isValidName()) result else null
+        } catch (e: Exception) {
+            println("cv-NANO ERROR: ${e::class.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    /** Cloud fallback via Gemini REST API. */
+    private suspend fun askGeminiRest(prompt: String): String? = withContext(Dispatchers.IO) {
+        if (geminiApiKey.isBlank()) return@withContext null
+        try {
+            println("cv-REST: calling Gemini REST API")
+            val requestBody = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply { put("text", prompt) })
                         })
                     })
-                }.toString()
+                })
+            }.toString()
 
-                val url = URL("https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=$geminiApiKey")
-                val conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json")
-                    connectTimeout = 10_000
-                    readTimeout = 10_000
-                    doOutput = true
-                    outputStream.use { it.write(requestBody.toByteArray()) }
-                }
-
-                val responseText = if (conn.responseCode == 200) {
-                    conn.inputStream.bufferedReader().readText()
-                } else {
-                    val err = conn.errorStream?.bufferedReader()?.readText() ?: ""
-                    println("cv-GEMINI HTTP ${conn.responseCode}: $err")
-                    return@withContext null
-                }
-
-                val result = JSONObject(responseText)
-                    .getJSONArray("candidates")
-                    .getJSONObject(0)
-                    .getJSONObject("content")
-                    .getJSONArray("parts")
-                    .getJSONObject(0)
-                    .getString("text")
-                    .trim()
-
-                println("cv-RESULT: $result")
-                if (result == "NONE" || result.isBlank() || result.contains(Regex("[\\n\\r.,!?]"))) null
-                else result
-            } catch (e: Exception) {
-                println("cv-GEMINI ERROR: ${e::class.simpleName}: ${e.message}")
-                null
+            val url = URL("https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=$geminiApiKey")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                connectTimeout = 10_000
+                readTimeout = 10_000
+                doOutput = true
+                outputStream.use { it.write(requestBody.toByteArray()) }
             }
+
+            val responseText = if (conn.responseCode == 200) {
+                conn.inputStream.bufferedReader().readText()
+            } else {
+                val err = conn.errorStream?.bufferedReader()?.readText() ?: ""
+                println("cv-REST HTTP ${conn.responseCode}: $err")
+                return@withContext null
+            }
+
+            val result = JSONObject(responseText)
+                .getJSONArray("candidates")
+                .getJSONObject(0)
+                .getJSONObject("content")
+                .getJSONArray("parts")
+                .getJSONObject(0)
+                .getString("text")
+                .trim()
+
+            println("cv-REST RESULT: $result")
+            if (result.isValidName()) result else null
+        } catch (e: Exception) {
+            println("cv-REST ERROR: ${e::class.simpleName}: ${e.message}")
+            null
         }
+    }
 
     private fun String.capitalizeFirst() = replaceFirstChar { it.uppercase() }
 }

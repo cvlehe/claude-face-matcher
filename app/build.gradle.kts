@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 val localProperties = Properties().also { props ->
@@ -51,10 +52,6 @@ android {
         buildConfig = true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
-    }
-
     androidResources {
         noCompress += "tflite"
     }
@@ -97,6 +94,8 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // Gemini for context-aware name detection
+    // Gemini Nano (on-device) — primary path; falls back to REST API on unsupported devices
+    implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")
+    // Gemini REST API — fallback for devices without AICore / Gemini Nano support
     implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
 }
