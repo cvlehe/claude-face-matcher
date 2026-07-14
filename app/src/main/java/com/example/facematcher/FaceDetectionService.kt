@@ -33,6 +33,10 @@ class FaceDetectionService : LifecycleService() {
         private const val OVERLAY_HIDE_DELAY_MS = 3000L
         private const val RECOGNITION_COOLDOWN_MS = 4000L
 
+        // Name detection lags the introduction (recognizer endpointing, Gemini round trip),
+        // so pair a detected name with a face seen up to this long ago, not just right now.
+        private const val FACE_MEMORY_MS = 10_000L
+
         /** True while the service is alive; used by Activity to decide whether to bind. */
         var isRunning = false
             private set
@@ -61,6 +65,12 @@ class FaceDetectionService : LifecycleService() {
     var lastFaceResults: List<FaceAnalyzer.FaceResult> = emptyList()
         private set
 
+    @Volatile
+    private var lastUnrecognizedFace: FaceAnalyzer.FaceResult? = null
+
+    @Volatile
+    private var lastUnrecognizedFaceAtMs = 0L
+
     /** Activity subscribes to get live results while in foreground. */
     var onFaceResultsChanged: ((List<FaceAnalyzer.FaceResult>) -> Unit)? = null
 
@@ -71,14 +81,18 @@ class FaceDetectionService : LifecycleService() {
         faceStorage = FaceStorage(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
         faceRecognizer = try { FaceRecognizer(this) } catch (_: Exception) { null }
-        if (BuildConfig.GEMINI_API_KEY.isNotBlank()) {
-            nameDetector = NameDetector(this, BuildConfig.GEMINI_API_KEY) { name ->
-                val embedding = lastFaceResults
-                    .maxByOrNull { it.bbox.width() * it.bbox.height() }
-                    ?.embedding ?: return@NameDetector
-                faceStorage.addFace(name, embedding)
-                showOverlay("Remembered: $name")
+        // No API-key gate: the regex path and on-device Gemini Nano path work without one;
+        // only the cloud REST fallback needs the key.
+        nameDetector = NameDetector(this, BuildConfig.GEMINI_API_KEY) { name ->
+            val face = faceForDetectedName()
+            if (face == null) {
+                println("cv-NAME: heard \"$name\" but no face seen in the last ${FACE_MEMORY_MS / 1000}s — dropped")
+                showOverlay("Heard \"$name\" — no face in frame")
+                return@NameDetector
             }
+            println("cv-NAME: storing \"$name\"")
+            faceStorage.addFace(name, face.embedding)
+            showOverlay("Remembered: $name")
         }
     }
 
@@ -90,7 +104,6 @@ class FaceDetectionService : LifecycleService() {
         )
         startCamera()
         nameDetector?.start()
-        nameDetector?.resume()
         return START_STICKY
     }
 
@@ -132,6 +145,12 @@ class FaceDetectionService : LifecycleService() {
                 .also { ia ->
                     ia.setAnalyzer(cameraExecutor, FaceAnalyzer(recognizer, faceStorage) { results ->
                         lastFaceResults = results
+                        results.filter { it.matchName == null }
+                            .maxByOrNull { it.bbox.width() * it.bbox.height() }
+                            ?.let {
+                                lastUnrecognizedFace = it
+                                lastUnrecognizedFaceAtMs = System.currentTimeMillis()
+                            }
                         mainHandler.post {
                             onFaceResultsChanged?.invoke(results)
                             handleRecognitions(results)
@@ -163,6 +182,22 @@ class FaceDetectionService : LifecycleService() {
             .addCameraFilter { infos -> infos.filter { it == provider.availableCameraInfos.first() } }
             .build()
         else -> null
+    }
+
+    /**
+     * The face to pair with a name that was just heard. Prefers an unrecognized face
+     * currently in frame, then any face in frame, then the last unrecognized face seen
+     * within [FACE_MEMORY_MS] — covering the lag between the introduction being spoken
+     * and the name being extracted.
+     */
+    private fun faceForDetectedName(): FaceAnalyzer.FaceResult? {
+        val current = lastFaceResults
+        return current.filter { it.matchName == null }
+            .maxByOrNull { it.bbox.width() * it.bbox.height() }
+            ?: current.maxByOrNull { it.bbox.width() * it.bbox.height() }
+            ?: lastUnrecognizedFace?.takeIf {
+                System.currentTimeMillis() - lastUnrecognizedFaceAtMs < FACE_MEMORY_MS
+            }
     }
 
     private fun handleRecognitions(results: List<FaceAnalyzer.FaceResult>) {

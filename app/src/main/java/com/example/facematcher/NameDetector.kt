@@ -2,9 +2,11 @@ package com.example.facematcher
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -33,12 +35,27 @@ class NameDetector(
     private val geminiApiKey: String,
     private val onNameDetected: (String) -> Unit
 ) {
+    companion object {
+        // Hypotheses below this confidence are ignored; scores < 0 mean "unknown" and are kept.
+        private const val MIN_CONFIDENCE = 0.3f
+
+        // How long a heard name question stays usable as context for a later short reply.
+        private const val QUESTION_CONTEXT_TTL_MS = 15_000L
+
+        // Watchdog: if the recognizer delivers no callback at all for this long, assume it
+        // stalled (died without onError) and force-restart it so listening never silently stops.
+        private const val WATCHDOG_STALL_MS = 60_000L
+        private const val WATCHDOG_CHECK_INTERVAL_MS = 15_000L
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
-    private var isActive = false
     private var isListening: Boolean by Delegates.observable(false) { prop, old, newValue ->
         println("cv-isListening: $newValue")
     }
+
+    // Set when the on-device recognizer rejects the language so we fall back to the default one.
+    private var onDeviceFailed = false
 
     private val job = Job()
     private val scope = CoroutineScope(Dispatchers.IO + job)
@@ -46,8 +63,8 @@ class NameDetector(
     // Prevents duplicate name callbacks when a partial result already triggered detection.
     private var detectedThisSession = false
 
-    private var previousPhrase: String? = null;
-
+    private var previousPhrase: String? = null
+    private var previousPhraseAtMs = 0L
 
     private val introRegex = Regex(
         """(?:i(?:'m| am)|my name(?:'s| is)|name(?:'s| is)|call me|they call me)\s+([A-Za-z]+)""",
@@ -58,20 +75,27 @@ class NameDetector(
         RegexOption.IGNORE_CASE
     )
 
+    // Leading words to skip in a reply before the name: "uh, it's Joe" → "Joe".
+    private val replyFillers = setOf(
+        "um", "uh", "oh", "ah", "well", "so", "yeah", "yes", "okay", "ok", "sure",
+        "hi", "hey", "hello", "it's", "its", "i'm", "im"
+    )
+
+    // Common words that shouldn't be mistaken for a name when they're the whole reply.
+    private val nonNameWords = replyFillers + setOf(
+        "no", "not", "nothing", "what", "who", "why", "when", "where", "how",
+        "sorry", "thanks", "thank", "please", "name", "your", "my", "me", "you",
+        "is", "was", "it", "that", "this", "the", "a", "an", "and", "but",
+        "right", "cool", "nice", "good", "great", "fine", "sir", "man", "dude"
+    )
+
+    /** Starts listening and keeps listening until [stop] — the mic is always on. */
     fun start() {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) return
-        isActive = true
-    }
-
-    fun resume() {
-        if (!isActive || isListening) return
+        if (isListening || !SpeechRecognizer.isRecognitionAvailable(context)) return
         isListening = true
+        lastCallbackAtMs = SystemClock.elapsedRealtime()
+        mainHandler.postDelayed(watchdogRunnable, WATCHDOG_CHECK_INTERVAL_MS)
         listen()
-    }
-
-    fun pause() {
-        isListening = false
-        speechRecognizer?.stopListening()
     }
 
     private fun destroyRecognizer() {
@@ -80,96 +104,209 @@ class NameDetector(
     }
 
     fun stop() {
-        isActive = false
+        isListening = false
         job.cancel()
-        pause()
+        mainHandler.removeCallbacks(watchdogRunnable)
+        speechRecognizer?.stopListening()
         destroyRecognizer()
+    }
+
+    private var lastCallbackAtMs = 0L
+
+    private val watchdogRunnable = object : Runnable {
+        override fun run() {
+            if (!isListening) return
+            if (SystemClock.elapsedRealtime() - lastCallbackAtMs > WATCHDOG_STALL_MS) {
+                println("cv-watchdog: recognizer stalled, restarting")
+                lastCallbackAtMs = SystemClock.elapsedRealtime()
+                listen(recreate = true)
+            }
+            mainHandler.postDelayed(this, WATCHDOG_CHECK_INTERVAL_MS)
+        }
     }
 
     private val listenIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2000L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+        // Keep this short: in noisy environments long silence thresholds never trigger,
+        // so sessions time out without ever delivering a final result.
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
     }
 
     private fun listen(recreate: Boolean = false) {
         detectedThisSession = false
         if (recreate || speechRecognizer == null) {
-            speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+            destroyRecognizer()
+            speechRecognizer = createRecognizer().apply {
                 setRecognitionListener(recognitionListener)
             }
         }
         speechRecognizer?.startListening(listenIntent)
     }
 
+    // On-device recognition avoids network round-trips, so sessions start faster and keep
+    // working offline. Fall back to the default recognizer if unsupported or it rejects
+    // the language.
+    private fun createRecognizer(): SpeechRecognizer =
+        if (!onDeviceFailed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+        ) {
+            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(context)
+        }
+
     private val recognitionListener = object : RecognitionListener {
+        private fun heartbeat() {
+            lastCallbackAtMs = SystemClock.elapsedRealtime()
+        }
+
         override fun onResults(results: Bundle) {
-            println("cv-results: ${results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)}")
-            val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                ?.joinToString(". ").orEmpty()
-            if (text.isNotBlank()) processPhrase(text)
+            heartbeat()
+            val alternatives = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+            val confidences = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+            println("cv-results: $alternatives confidences=${confidences?.toList()}")
+            // Some recognizers (e.g. Pixel on-device) report 0.0 to mean "no confidence
+            // available" rather than the documented -1, so treat <= 0 as unknown and keep it.
+            processResults(alternatives.filterIndexed { i, _ ->
+                val score = confidences?.getOrNull(i) ?: -1f
+                score <= 0f || score >= MIN_CONFIDENCE
+            })
             if (isListening) mainHandler.post { listen() }
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            println("cv-partialResults: ${partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)}")
-
+            heartbeat()
+            val partials = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+            println("cv-partialResults: $partials")
+            // Sessions in noisy environments often die (NO_MATCH/timeout) before onResults
+            // fires, so run the fast regex path on partial text too. The context/Gemini
+            // path waits for final results.
+            if (detectedThisSession) return
+            for (partial in partials) {
+                if (tryDirectIntro(partial)) return
+            }
+            // Remember a name question heard mid-session: noisy sessions often die
+            // before final results, and the answer then arrives in a later session.
+            partials.firstOrNull { nameQuestionRegex.containsMatchIn(it) }?.let {
+                previousPhrase = it
+                previousPhraseAtMs = SystemClock.elapsedRealtime()
+            }
         }
 
         override fun onError(error: Int) {
+            heartbeat()
             val recreate: Boolean
             val retryDelayMs: Long
             when (error) {
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> { recreate = false; retryDelayMs = 2000L }
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> return
                 SpeechRecognizer.ERROR_NO_MATCH -> { recreate = false; retryDelayMs = 300L }
-                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> { recreate = true; retryDelayMs = 1000L }
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> {
+                    onDeviceFailed = true; recreate = true; retryDelayMs = 1000L
+                }
                 else -> { recreate = true; retryDelayMs = 1000L }
             }
             if (isListening) mainHandler.postDelayed({ listen(recreate) }, retryDelayMs)
         }
 
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onEndOfSpeech() {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onReadyForSpeech(params: Bundle?) { heartbeat() }
+        override fun onEndOfSpeech() { heartbeat() }
+        override fun onBeginningOfSpeech() { heartbeat() }
+        override fun onRmsChanged(rmsdB: Float) { heartbeat() }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
-    private fun processPhrase(text: String) {
-        if (detectedThisSession) return
+    /** Returns true if a direct "I'm X" style introduction was found and dispatched. */
+    private fun tryDirectIntro(text: String): Boolean {
+        val name = introRegex.find(text)?.groupValues?.getOrNull(1) ?: return false
+        detectedThisSession = true
+        dispatchName(name.capitalizeFirst())
+        return true
+    }
 
-        // Fast path: direct introduction pattern
-        introRegex.find(text)?.groupValues?.getOrNull(1)?.let { name ->
-            detectedThisSession = true
-            mainHandler.post { onNameDetected(name.capitalizeFirst()) }
-            return
+    private fun dispatchName(name: String) {
+        println("cv-NAME detected: $name")
+        mainHandler.post {
+            previousPhrase = null
+            onNameDetected(name)
+        }
+    }
+
+    private fun processResults(alternatives: List<String>) {
+        if (detectedThisSession || alternatives.isEmpty()) return
+
+        // Fast path: direct introduction pattern in any hypothesis.
+        for (alternative in alternatives) {
+            if (tryDirectIntro(alternative)) return
         }
 
         // Context path: ask Gemini if there's any sign a name was stated.
-        // questionInCurrent: question + answer arrived in one result or partial.
-        // questionInPrevious: question came earlier, current phrase is a short reply.
-        // shortWithRecentQuestion: recognizer split question/answer across sessions;
-        //   recent context has the question and current result is 1-2 words (likely the name).
+        // questionInCurrent: question + answer may have arrived in one result.
+        // questionInPrevious: question came in an earlier session and the current phrase
+        //   is a plausible reply. Questions expire after QUESTION_CONTEXT_TTL_MS so stale
+        //   context can't turn random later chatter into a Gemini query.
+        val text = alternatives.first()
+        val now = SystemClock.elapsedRealtime()
         val questionInCurrent = nameQuestionRegex.containsMatchIn(text)
-        val questionInPrevious =  previousPhrase != null&&  nameQuestionRegex.containsMatchIn(
-            previousPhrase!!
-        )
-        val shouldAskGemini = geminiApiKey.isNotBlank() &&  questionInPrevious
+        val freshPrevious = previousPhrase
+            ?.takeIf { now - previousPhraseAtMs < QUESTION_CONTEXT_TTL_MS }
+        val questionInPrevious = freshPrevious != null && nameQuestionRegex.containsMatchIn(freshPrevious)
 
-        if(questionInCurrent) {
+        if (questionInCurrent) {
             previousPhrase = text
-        }else if (shouldAskGemini) {
+            previousPhraseAtMs = now
+        }
+
+        // Deterministic path — no Gemini needed: the short reply to a name question IS
+        // the name. Handles both the answer arriving in the same phrase as the question
+        // and in a later phrase within the context window.
+        for (alternative in alternatives) {
+            val candidate = when {
+                questionInCurrent -> nameQuestionRegex.find(alternative)?.let { match ->
+                    extractNameFromReply(alternative.substring(match.range.last + 1))
+                }
+                questionInPrevious -> extractNameFromReply(alternative)
+                else -> null
+            }
+            if (candidate != null) {
+                detectedThisSession = true
+                dispatchName(candidate)
+                return
+            }
+        }
+
+        // Fallback for messier phrasings the heuristics above can't parse.
+        if (questionInCurrent || questionInPrevious) {
             scope.launch {
-                askGemini(text, previousPhrase)?.let { name ->
+                askGemini(text, freshPrevious)?.let { name ->
                     detectedThisSession = true
-                    mainHandler.post { onNameDetected(name) }
+                    dispatchName(name)
                 }
             }
         }
+    }
+
+    /**
+     * For a short utterance following a name question, extract a plausible first name.
+     * Skips leading fillers ("uh, it's Joe"), then accepts at most two remaining words
+     * ("Joe", "Joe Smith") so full sentences fall through to the Gemini path instead.
+     */
+    private fun extractNameFromReply(text: String): String? {
+        val words = text.trim()
+            .split(Regex("\\s+"))
+            .map { it.trim { c -> !c.isLetter() && c != '\'' } }
+            .filter { it.isNotEmpty() }
+            .dropWhile { it.lowercase() in replyFillers }
+        if (words.isEmpty() || words.size > 2) return null
+        val candidate = words.first()
+        if (candidate.length < 2) return null
+        if (candidate.lowercase() in nonNameWords) return null
+        if (!candidate.all { it.isLetter() }) return null
+        return candidate.capitalizeFirst()
     }
 
     private fun buildPrompt(latestPhrase: String, previous: String?) = """
@@ -197,7 +334,6 @@ class NameDetector(
 
     private suspend fun askGemini(latestPhrase: String, previous: String?): String? {
         val prompt = buildPrompt(latestPhrase, previous)
-        previousPhrase = null
         return askGeminiNano(prompt) ?: askGeminiRest(prompt)
     }
 

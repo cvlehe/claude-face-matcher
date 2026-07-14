@@ -16,6 +16,8 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Preview as CameraPreview
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,12 +27,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,6 +45,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -48,8 +53,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -113,7 +120,6 @@ class MainActivity : ComponentActivity() {
         refreshPermissions()
 
         setContent {
-            var showCameraFeed by remember { mutableStateOf(false) }
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     ControlPanel(
@@ -130,11 +136,8 @@ class MainActivity : ComponentActivity() {
                                 ?: FaceStorage(this).clearAll()
                             savedFaceCount.intValue = 0
                         },
-                        onAddFace = { name ->
-                            val emb = faceResults
-                                .maxByOrNull { it.bbox.width() * it.bbox.height() }
-                                ?.embedding ?: return@ControlPanel
-                            boundService?.faceStorage?.addFace(name, emb)
+                        onAddFace = { name, embedding ->
+                            boundService?.faceStorage?.addFace(name, embedding)
                             savedFaceCount.intValue = boundService?.faceStorage?.size()
                                 ?: savedFaceCount.intValue
                         },
@@ -157,15 +160,9 @@ class MainActivity : ComponentActivity() {
                         onRequestAudio = {
                             audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
-                        onShowCamera = { showCameraFeed = true }
+                        onAttachPreview = { boundService?.attachPreviewSurface(it) },
+                        onDetachPreview = { boundService?.detachPreviewSurface() }
                     )
-                    if (showCameraFeed) {
-                        CameraFeedScreen(
-                            onAttach = { boundService?.attachPreviewSurface(it) },
-                            onDetach = { boundService?.detachPreviewSurface() },
-                            onClose = { showCameraFeed = false }
-                        )
-                    }
                 }
             }
         }
@@ -241,17 +238,36 @@ fun ControlPanel(
     faceResults: List<FaceAnalyzer.FaceResult>,
     savedFaceCount: Int,
     onStartStop: () -> Unit,
-    onAddFace: (String) -> Unit,
+    onAddFace: (name: String, embedding: FloatArray) -> Unit,
     onClearFaces: () -> Unit,
     onRequestCamera: () -> Unit,
     onRequestNotification: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestAudio: () -> Unit,
-    onShowCamera: () -> Unit = {}
+    onAttachPreview: (CameraPreview.SurfaceProvider) -> Unit = {},
+    onDetachPreview: () -> Unit = {}
 ) {
-    var showAddDialog by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
-    var dialogName by remember { mutableStateOf("") }
+    var showCameraPreview by remember { mutableStateOf(false) }
+    var previewFullscreen by remember { mutableStateOf(false) }
+
+    // Hosted in movableContentOf so the same PreviewView instance (and its camera surface)
+    // moves between the inline slot and the fullscreen overlay instead of being torn down
+    // and reattached when toggling.
+    val cameraPreviewContent = remember {
+        movableContentOf { modifier: Modifier ->
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).also { onAttachPreview(it.surfaceProvider) }
+                },
+                onRelease = { onDetachPreview() },
+                modifier = modifier
+            )
+        }
+    }
+    // Snapshot of the face taken when "Remember this face…" was tapped, so the still and
+    // embedding stay consistent even as live results keep updating underneath.
+    var capturedFace by remember { mutableStateOf<FaceAnalyzer.FaceResult?>(null) }
 
     val canStart = hasCameraPermission && hasOverlayPermission && hasNotificationPermission && hasAudioPermission
     val largestFace = faceResults.maxByOrNull { it.bbox.width() * it.bbox.height() }
@@ -259,6 +275,7 @@ fun ControlPanel(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp, 100.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -288,11 +305,17 @@ fun ControlPanel(
 
         if (isRunning) {
             val names = faceResults.mapNotNull { it.matchName }
+            val unrecognizedCount = faceResults.count { it.matchName == null }
             Text(
                 text = "In frame: ${faceResults.size}" +
                     if (names.isNotEmpty()) " · Recognized: ${names.joinToString(", ")}" else "",
                 fontSize = 14.sp,
                 color = Color.Gray
+            )
+            Text(
+                text = "Unrecognized faces: $unrecognizedCount",
+                fontSize = 14.sp,
+                color = if (unrecognizedCount > 0) Color(0xFFFF9800) else Color.Gray
             )
         }
 
@@ -310,7 +333,7 @@ fun ControlPanel(
         }
 
         OutlinedButton(
-            onClick = { dialogName = ""; showAddDialog = true },
+            onClick = { capturedFace = largestFace },
             enabled = isRunning && largestFace != null,
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -324,11 +347,40 @@ fun ControlPanel(
         }
 
         OutlinedButton(
-            onClick = onShowCamera,
+            onClick = {
+                showCameraPreview = !showCameraPreview
+                if (!showCameraPreview) previewFullscreen = false
+            },
             enabled = isRunning,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (isRunning) "View camera feed" else "Start detection to view camera")
+            Text(
+                when {
+                    !isRunning -> "Start detection to view camera"
+                    showCameraPreview -> "Hide camera preview"
+                    else -> "Show camera preview"
+                }
+            )
+        }
+
+        if (isRunning && showCameraPreview && !previewFullscreen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(240.dp)
+                    .clip(RoundedCornerShape(12.dp))
+            ) {
+                cameraPreviewContent(Modifier.fillMaxSize())
+                TextButton(
+                    onClick = { previewFullscreen = true },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(8.dp))
+                ) {
+                    Text("Full screen", color = Color.White)
+                }
+            }
         }
 
         OutlinedButton(
@@ -360,63 +412,86 @@ fun ControlPanel(
         )
     }
 
-    if (showAddDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddDialog = false },
-            title = { Text("Remember face") },
-            text = {
-                Column {
-                    Text("Enter the name of the person currently in frame.")
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = dialogName,
-                        onValueChange = { dialogName = it },
-                        label = { Text("Name") },
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val name = dialogName.trim()
-                    if (name.isNotEmpty()) {
-                        onAddFace(name)
-                        showAddDialog = false
-                    }
-                }) { Text("Save") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddDialog = false }) { Text("Cancel") }
+    if (isRunning && showCameraPreview && previewFullscreen) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            cameraPreviewContent(Modifier.fillMaxSize())
+            TextButton(
+                onClick = { previewFullscreen = false },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(24.dp, 50.dp)
+                    .background(Color(0x99000000), RoundedCornerShape(8.dp))
+            ) {
+                Text("Exit full screen", color = Color.White)
             }
+        }
+    }
+
+    capturedFace?.let { face ->
+        AddFaceScreen(
+            face = face,
+            onSubmit = { name ->
+                onAddFace(name, face.embedding)
+                capturedFace = null
+            },
+            onCancel = { capturedFace = null }
         )
     }
 }
 
 @Composable
-fun CameraFeedScreen(
-    onAttach: (CameraPreview.SurfaceProvider) -> Unit,
-    onDetach: () -> Unit,
-    onClose: () -> Unit
+fun AddFaceScreen(
+    face: FaceAnalyzer.FaceResult,
+    onSubmit: (String) -> Unit,
+    onCancel: () -> Unit
 ) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { ctx ->
-                PreviewView(ctx).also { onAttach(it.surfaceProvider) }
-            },
-            modifier = Modifier.fillMaxSize(),
-            onRelease = { onDetach() }
-        )
-        IconButton(
-            onClick = onClose,
+    var name by remember { mutableStateOf("") }
+
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(16.dp, 50.dp)
+                .fillMaxSize()
+                .padding(24.dp, 100.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Icon(
-                painter = painterResource(android.R.drawable.ic_menu_close_clear_cancel),
-                contentDescription = "Close",
-                tint = Color.White
+            Text("Remember face", style = MaterialTheme.typography.headlineMedium)
+
+            Image(
+                bitmap = face.faceBitmap.asImageBitmap(),
+                contentDescription = "Captured face",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(220.dp)
+                    .clip(RoundedCornerShape(12.dp))
             )
+
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Button(
+                onClick = { onSubmit(name.trim()) },
+                enabled = name.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Save")
+            }
+
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Cancel")
+            }
         }
     }
 }
@@ -446,7 +521,7 @@ private fun PreviewControlPanelRunning() {
                 hasAudioPermission = true,
                 faceResults = emptyList(),
                 savedFaceCount = 3,
-                onStartStop = {}, onAddFace = {}, onClearFaces = {},
+                onStartStop = {}, onAddFace = { _, _ -> }, onClearFaces = {},
                 onRequestCamera = {}, onRequestNotification = {},
                 onRequestOverlay = {}, onRequestAudio = {}
             )
@@ -467,7 +542,7 @@ private fun PreviewControlPanelStopped() {
                 hasAudioPermission = false,
                 faceResults = emptyList(),
                 savedFaceCount = 0,
-                onStartStop = {}, onAddFace = {}, onClearFaces = {},
+                onStartStop = {}, onAddFace = { _, _ -> }, onClearFaces = {},
                 onRequestCamera = {}, onRequestNotification = {},
                 onRequestOverlay = {}, onRequestAudio = {}
             )

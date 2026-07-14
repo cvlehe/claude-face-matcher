@@ -21,13 +21,16 @@ class FaceAnalyzer(
         val bbox: Rect,
         val embedding: FloatArray,
         val matchName: String?,
-        val matchDistance: Float
+        val matchDistance: Float,
+        val faceBitmap: Bitmap
     )
 
     private val faceDetector: FaceDetector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setMinFaceSize(0.15f)
+            // Low floor so faces on a screen or across a room are still detected;
+            // 0.15 required a face to span 15% of the frame width.
+            .setMinFaceSize(0.08f)
             .build()
     )
 
@@ -78,7 +81,8 @@ class FaceAnalyzer(
                         bbox = clamped,
                         embedding = embedding,
                         matchName = match?.first,
-                        matchDistance = match?.second ?: Float.MAX_VALUE
+                        matchDistance = match?.second ?: Float.MAX_VALUE,
+                        faceBitmap = cropped
                     )
                 }
                 onResult(results)
