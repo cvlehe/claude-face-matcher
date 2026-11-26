@@ -44,7 +44,7 @@ Tasks are ordered by dependency. Each task is complete only when its acceptance 
 
 ### Progress checklist
 
-- [ ] 1. Establish a runnable baseline
+- [x] 1. Establish a runnable baseline
 - [ ] 2. Define the session lifecycle and visible status
 - [ ] 3. Make camera observations reliable
 - [ ] 4. Validate and calibrate face matching
@@ -62,6 +62,8 @@ When a task's **Done when** condition is met, change its checkbox to `[x]` in th
 ### 1. Establish a runnable baseline
 
 Run the current app on a phone. Verify permissions, Start/Stop, camera frames, model initialization, speech callbacks, storage, and overlay display. Record device and OS version, observable failures, and reproducible steps. Keep this baseline in a short test log in the repository. Do not treat a successful build as runtime proof.
+
+Baseline result: [Phone baseline test log](PHONE_BASELINE_TEST_LOG.md).
 
 **Done when:** The starting behavior and an end-to-end result are reproducible, with each failure recorded as a concrete test case.
 
