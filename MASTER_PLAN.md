@@ -46,7 +46,7 @@ Tasks are ordered by dependency. Each task is complete only when its acceptance 
 
 - [x] 1. Establish a runnable baseline
 - [x] 2. Define the session lifecycle and visible status
-- [ ] 3. Make camera observations reliable
+- [x] 3. Make camera observations reliable
 - [ ] 4. Validate and calibrate face matching
 - [ ] 5. Add a spoken-name toggle
 - [ ] 6. Make speech recognition available without Gemini
@@ -81,6 +81,8 @@ Verification: [Step 2 phone test log](PHONE_SESSION_LIFECYCLE_TEST_LOG.md).
 Select the intended phone camera explicitly and handle unavailable cameras and bind failures. Attach a timestamp, frame size, bounding box, tracking identifier where available, embedding, and quality assessment to each face observation. Reject faces that are too small, blurred, cut off, or otherwise unsuitable for enrollment. Keep analysis responsive without queuing stale frames.
 
 **Done when:** The app consistently detects and tracks visible faces on test devices and surfaces camera failures instead of silently continuing.
+
+Verification: [Step 3 phone test log](PHONE_CAMERA_OBSERVATIONS_TEST_LOG.md).
 
 ### 4. Validate and calibrate face matching
 

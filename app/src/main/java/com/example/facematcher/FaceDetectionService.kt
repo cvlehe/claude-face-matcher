@@ -13,11 +13,13 @@ import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.Camera
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -58,12 +60,28 @@ class FaceDetectionService : LifecycleService() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var cameraPreview: Preview? = null
+    private var faceAnalyzer: FaceAnalyzer? = null
+    private var activeCamera: Camera? = null
     private var previewSurfaceProvider: Preview.SurfaceProvider? = null
     private var activeCameraSelector: CameraSelector? = null
     private var activeLensFacing: Int? = null
     private var cameraStarting = false
     private var sessionStarted = false
     private var generation = 0
+    private var lastFrameNanos = 0L
+    private val cameraWatchdog = object : Runnable {
+        override fun run() {
+            if (!sessionStarted || imageAnalysis == null) return
+            val ageMs = (SystemClock.elapsedRealtimeNanos() - lastFrameNanos) / 1_000_000
+            if (ageMs > 5_000) {
+                lastFaceResults = emptyList()
+                onFaceResultsChanged?.invoke(emptyList())
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE,
+                    camera = "No camera frames"))
+            }
+            mainHandler.postDelayed(this, 2_000)
+        }
+    }
     var sessionStatus = SessionStatus()
         private set
     var onSessionStatusChanged: ((SessionStatus) -> Unit)? = null
@@ -88,6 +106,7 @@ class FaceDetectionService : LifecycleService() {
         if (BuildConfig.GEMINI_API_KEY.isNotBlank()) {
             nameDetector = NameDetector(this, BuildConfig.GEMINI_API_KEY, { name ->
                 val embedding = lastFaceResults
+                    .filter { it.suitableForEnrollment }
                     .maxByOrNull { it.bbox.width() * it.bbox.height() }
                     ?.embedding ?: return@NameDetector
                 faceStorage.addFace(name, embedding)
@@ -160,12 +179,18 @@ class FaceDetectionService : LifecycleService() {
         isRunning = false
         generation++
         nameDetector?.stop()
+        mainHandler.removeCallbacks(cameraWatchdog)
+        activeCamera?.cameraInfo?.cameraState?.removeObservers(this)
         cameraProvider?.unbindAll()
         imageAnalysis?.clearAnalyzer()
+        faceAnalyzer?.close()
+        faceAnalyzer = null
+        activeCamera = null
         cameraProvider = null
         imageAnalysis = null
         cameraPreview = null
         activeCameraSelector = null
+        activeLensFacing = null
         cameraStarting = false
         lastFaceResults = emptyList()
         mainHandler.removeCallbacks(hideOverlayRunnable)
@@ -219,6 +244,7 @@ class FaceDetectionService : LifecycleService() {
             return
         }
         future.addListener({
+            var pendingAnalyzer: FaceAnalyzer? = null
             try {
                 if (!sessionStarted || generation != requestedGeneration) return@addListener
                 val provider = future.get()
@@ -226,36 +252,61 @@ class FaceDetectionService : LifecycleService() {
                     updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "No camera"))
                     return@addListener
                 }
+                val analyzer = FaceAnalyzer(recognizer, faceStorage, cameraExecutor, { results ->
+                    mainHandler.post {
+                        if (!sessionStarted || generation != requestedGeneration ||
+                            results.firstOrNull()?.let {
+                                SystemClock.elapsedRealtimeNanos() - it.timestampNanos > 2_000_000_000L
+                            } == true) return@post
+                        lastFrameNanos = SystemClock.elapsedRealtimeNanos()
+                        if (sessionStatus.camera != "Active") {
+                            updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.ACTIVE, camera = "Active"))
+                        }
+                        lastFaceResults = results
+                        onFaceResultsChanged?.invoke(results)
+                        handleRecognitions(results)
+                    }
+                }, { detail ->
+                    mainHandler.post {
+                        if (!sessionStarted || generation != requestedGeneration) return@post
+                        updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = detail))
+                    }
+                })
+                pendingAnalyzer = analyzer
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also { ia ->
-                        ia.setAnalyzer(cameraExecutor, FaceAnalyzer(recognizer, faceStorage) { results ->
-                            mainHandler.post {
-                                if (!sessionStarted || generation != requestedGeneration) return@post
-                                lastFaceResults = results
-                                onFaceResultsChanged?.invoke(results)
-                                handleRecognitions(results)
-                            }
-                        })
+                        ia.setAnalyzer(cameraExecutor, analyzer)
                     }
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewSurfaceProvider)
                 }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, analysis, preview)
+                val camera = provider.bindToLifecycle(this, selector, analysis, preview)
                 cameraProvider = provider
                 imageAnalysis = analysis
                 cameraPreview = preview
+                faceAnalyzer = analyzer
+                pendingAnalyzer = null
+                activeCamera = camera
+                observeCamera(camera)
                 activeCameraSelector = selector
                 activeLensFacing = when (selector) {
                     CameraSelector.DEFAULT_BACK_CAMERA -> CameraSelector.LENS_FACING_BACK
                     CameraSelector.DEFAULT_FRONT_CAMERA -> CameraSelector.LENS_FACING_FRONT
                     else -> null
                 }
-                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.ACTIVE, camera = "Active"))
+                lastFrameNanos = SystemClock.elapsedRealtimeNanos()
+                mainHandler.removeCallbacks(cameraWatchdog)
+                mainHandler.postDelayed(cameraWatchdog, 2_000)
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.STARTING, camera = "Waiting for frames"))
             } catch (_: Exception) {
-                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "Unavailable"))
+                pendingAnalyzer?.close()
+                imageAnalysis?.clearAnalyzer()
+                faceAnalyzer?.close()
+                faceAnalyzer = null
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "Camera bind failed"))
             } finally {
                 cameraStarting = false
             }
@@ -288,16 +339,39 @@ class FaceDetectionService : LifecycleService() {
         if (!hasOtherCamera) return false
 
         return try {
+            activeCamera?.cameraInfo?.cameraState?.removeObservers(this)
             provider.unbind(analysis, preview)
-            provider.bindToLifecycle(this, nextSelector, analysis, preview)
+            val camera = provider.bindToLifecycle(this, nextSelector, analysis, preview)
+            activeCamera = camera
+            observeCamera(camera)
             activeCameraSelector = nextSelector
             activeLensFacing = nextSelector.lensFacing
+            lastFaceResults = emptyList()
+            onFaceResultsChanged?.invoke(emptyList())
+            lastFrameNanos = SystemClock.elapsedRealtimeNanos()
+            updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.STARTING, camera = "Waiting for frames"))
             true
         } catch (_: Exception) {
             try {
-                provider.bindToLifecycle(this, oldSelector, analysis, preview)
-            } catch (_: Exception) {}
+                val camera = provider.bindToLifecycle(this, oldSelector, analysis, preview)
+                activeCamera = camera
+                observeCamera(camera)
+            } catch (_: Exception) {
+                activeCamera = null
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "Camera bind failed"))
+            }
             false
+        }
+    }
+
+    private fun observeCamera(camera: Camera) {
+        camera.cameraInfo.cameraState.observe(this) { state ->
+            if (sessionStarted && activeCamera === camera && state.error != null) {
+                lastFaceResults = emptyList()
+                onFaceResultsChanged?.invoke(emptyList())
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE,
+                    camera = "Camera interrupted"))
+            }
         }
     }
 

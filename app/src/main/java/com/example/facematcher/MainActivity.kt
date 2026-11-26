@@ -163,6 +163,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onAddFace = { name ->
                             val emb = faceResults
+                                .filter { it.suitableForEnrollment }
                                 .maxByOrNull { it.bbox.width() * it.bbox.height() }
                                 ?.embedding ?: return@ControlPanel
                             boundService?.faceStorage?.addFace(name, emb)
@@ -330,7 +331,8 @@ fun ControlPanel(
     var dialogName by remember { mutableStateOf("") }
 
     val canStart = hasCameraPermission && hasOverlayPermission && hasNotificationPermission && hasAudioPermission
-    val largestFace = faceResults.maxByOrNull { it.bbox.width() * it.bbox.height() }
+    val largestFace = faceResults.filter { it.suitableForEnrollment }
+        .maxByOrNull { it.bbox.width() * it.bbox.height() }
 
     Column(
         modifier = Modifier
@@ -379,6 +381,15 @@ fun ControlPanel(
                 fontSize = 14.sp,
                 color = Color.Gray
             )
+            if (BuildConfig.DEBUG && faceResults.isNotEmpty()) {
+                Text("Tracking IDs: " +
+                    faceResults.joinToString(", ") { it.trackingId?.toString() ?: "unavailable" },
+                    fontSize = 12.sp, color = Color.Gray)
+            }
+            if (faceResults.isNotEmpty() && largestFace == null) {
+                Text("Face unsuitable for saving: ${faceResults.first().quality.name.lowercase().replace('_', ' ')}",
+                    fontSize = 14.sp, color = Color(0xFFFF9800))
+            }
         }
 
         Spacer(Modifier.height(4.dp))
@@ -402,7 +413,7 @@ fun ControlPanel(
             Text(
                 when {
                     !isRunning -> "Start detection to add a face"
-                    largestFace == null -> "No face in frame"
+                    largestFace == null -> "No suitable face in frame"
                     else -> "Remember this face…"
                 }
             )
