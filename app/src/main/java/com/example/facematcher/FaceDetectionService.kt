@@ -51,7 +51,13 @@ class FaceDetectionService : LifecycleService() {
     private var faceRecognizer: FaceRecognizer? = null
     lateinit var faceStorage: FaceStorage
     private var nameDetector: NameDetector? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var imageAnalysis: ImageAnalysis? = null
     private var cameraPreview: Preview? = null
+    private var previewSurfaceProvider: Preview.SurfaceProvider? = null
+    private var activeCameraSelector: CameraSelector? = null
+    private var activeLensFacing: Int? = null
+    private var cameraStarting = false
 
     private var overlayView: TextView? = null
     private val recentRecognitions = mutableMapOf<String, Long>()
@@ -121,37 +127,84 @@ class FaceDetectionService : LifecycleService() {
     }
 
     private fun startCamera() {
+        if (cameraStarting || cameraPreview != null) return
         val recognizer = faceRecognizer ?: return
+        cameraStarting = true
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
-            val provider = future.get()
-            val selector = cameraSelector(provider) ?: return@addListener
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also { ia ->
-                    ia.setAnalyzer(cameraExecutor, FaceAnalyzer(recognizer, faceStorage) { results ->
-                        lastFaceResults = results
-                        mainHandler.post {
-                            onFaceResultsChanged?.invoke(results)
-                            handleRecognitions(results)
-                        }
-                    })
-                }
-            val preview = Preview.Builder().build().also { cameraPreview = it }
             try {
+                val provider = future.get()
+                val selector = cameraSelector(provider) ?: return@addListener
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                    .also { ia ->
+                        ia.setAnalyzer(cameraExecutor, FaceAnalyzer(recognizer, faceStorage) { results ->
+                            lastFaceResults = results
+                            mainHandler.post {
+                                onFaceResultsChanged?.invoke(results)
+                                handleRecognitions(results)
+                            }
+                        })
+                    }
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewSurfaceProvider)
+                }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, selector, imageAnalysis, preview)
-            } catch (_: Exception) {}
+                provider.bindToLifecycle(this, selector, analysis, preview)
+                cameraProvider = provider
+                imageAnalysis = analysis
+                cameraPreview = preview
+                activeCameraSelector = selector
+                activeLensFacing = when (selector) {
+                    CameraSelector.DEFAULT_BACK_CAMERA -> CameraSelector.LENS_FACING_BACK
+                    CameraSelector.DEFAULT_FRONT_CAMERA -> CameraSelector.LENS_FACING_FRONT
+                    else -> null
+                }
+            } catch (_: Exception) {
+            } finally {
+                cameraStarting = false
+            }
         }, ContextCompat.getMainExecutor(this))
     }
 
     fun attachPreviewSurface(surfaceProvider: Preview.SurfaceProvider) {
+        previewSurfaceProvider = surfaceProvider
         cameraPreview?.setSurfaceProvider(surfaceProvider)
     }
 
-    fun detachPreviewSurface() {
+    fun detachPreviewSurface(surfaceProvider: Preview.SurfaceProvider) {
+        if (previewSurfaceProvider !== surfaceProvider) return
+        previewSurfaceProvider = null
         cameraPreview?.setSurfaceProvider(null)
+    }
+
+    /** Switches the camera used by both live analysis and the visible preview. */
+    fun switchCamera(): Boolean {
+        val provider = cameraProvider ?: return false
+        val analysis = imageAnalysis ?: return false
+        val preview = cameraPreview ?: return false
+        val oldSelector = activeCameraSelector ?: return false
+        val nextSelector = when (activeLensFacing) {
+            CameraSelector.LENS_FACING_BACK -> CameraSelector.DEFAULT_FRONT_CAMERA
+            CameraSelector.LENS_FACING_FRONT -> CameraSelector.DEFAULT_BACK_CAMERA
+            else -> return false
+        }
+        val hasOtherCamera = try { provider.hasCamera(nextSelector) } catch (_: Exception) { false }
+        if (!hasOtherCamera) return false
+
+        return try {
+            provider.unbind(analysis, preview)
+            provider.bindToLifecycle(this, nextSelector, analysis, preview)
+            activeCameraSelector = nextSelector
+            activeLensFacing = nextSelector.lensFacing
+            true
+        } catch (_: Exception) {
+            try {
+                provider.bindToLifecycle(this, oldSelector, analysis, preview)
+            } catch (_: Exception) {}
+            false
+        }
     }
 
     // XR emulator cameras report no lens-facing metadata, so fall back to the
@@ -221,6 +274,7 @@ class FaceDetectionService : LifecycleService() {
         isRunning = false
         mainHandler.removeCallbacks(hideOverlayRunnable)
         nameDetector?.stop()
+        cameraProvider?.unbindAll()
         cameraExecutor.shutdown()
         faceRecognizer?.close()
         removeOverlay()

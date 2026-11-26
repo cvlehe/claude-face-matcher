@@ -10,21 +10,27 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Preview as CameraPreview
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -51,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -59,6 +66,7 @@ class MainActivity : ComponentActivity() {
 
     private var isBound = false
     private var boundService: FaceDetectionService? = null
+    private var previewSurfaceProvider: CameraPreview.SurfaceProvider? = null
 
     private val isServiceRunning = mutableStateOf(false)
     private val faceResults = mutableStateListOf<FaceAnalyzer.FaceResult>()
@@ -75,6 +83,7 @@ class MainActivity : ComponentActivity() {
             isBound = true
             isServiceRunning.value = true
             savedFaceCount.intValue = svc.faceStorage.size()
+            previewSurfaceProvider?.let(svc::attachPreviewSurface)
             svc.onFaceResultsChanged = { results ->
                 faceResults.clear()
                 faceResults.addAll(results)
@@ -114,6 +123,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             var showCameraFeed by remember { mutableStateOf(false) }
+            var showInlinePreview by remember { mutableStateOf(false) }
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     ControlPanel(
@@ -124,7 +134,12 @@ class MainActivity : ComponentActivity() {
                         hasAudioPermission = hasAudioPermission.value,
                         faceResults = faceResults,
                         savedFaceCount = savedFaceCount.intValue,
-                        onStartStop = { if (isServiceRunning.value) stopDetection() else startDetection() },
+                        onStartStop = {
+                            if (isServiceRunning.value) {
+                                showInlinePreview = false
+                                stopDetection()
+                            } else startDetection()
+                        },
                         onClearFaces = {
                             boundService?.faceStorage?.clearAll()
                                 ?: FaceStorage(this).clearAll()
@@ -157,12 +172,18 @@ class MainActivity : ComponentActivity() {
                         onRequestAudio = {
                             audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
-                        onShowCamera = { showCameraFeed = true }
+                        onShowCamera = { showCameraFeed = true },
+                        showInlinePreview = showInlinePreview && !showCameraFeed,
+                        onToggleInlinePreview = { showInlinePreview = !showInlinePreview },
+                        onAttachPreview = ::attachPreviewSurface,
+                        onDetachPreview = ::detachPreviewSurface,
+                        onSwitchCamera = ::switchCamera
                     )
                     if (showCameraFeed) {
                         CameraFeedScreen(
-                            onAttach = { boundService?.attachPreviewSurface(it) },
-                            onDetach = { boundService?.detachPreviewSurface() },
+                            onAttach = ::attachPreviewSurface,
+                            onDetach = ::detachPreviewSurface,
+                            onSwitchCamera = ::switchCamera,
                             onClose = { showCameraFeed = false }
                         )
                     }
@@ -188,6 +209,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (isBound) {
+            previewSurfaceProvider?.let { boundService?.detachPreviewSurface(it) }
             boundService?.onFaceResultsChanged = null
             unbindService(serviceConnection)
             isBound = false
@@ -229,6 +251,22 @@ class MainActivity : ComponentActivity() {
         faceResults.clear()
         savedFaceCount.intValue = FaceStorage(this).size()
     }
+
+    private fun attachPreviewSurface(surfaceProvider: CameraPreview.SurfaceProvider) {
+        previewSurfaceProvider = surfaceProvider
+        boundService?.attachPreviewSurface(surfaceProvider)
+    }
+
+    private fun detachPreviewSurface(surfaceProvider: CameraPreview.SurfaceProvider) {
+        boundService?.detachPreviewSurface(surfaceProvider)
+        if (previewSurfaceProvider === surfaceProvider) previewSurfaceProvider = null
+    }
+
+    private fun switchCamera() {
+        if (boundService?.switchCamera() != true) {
+            Toast.makeText(this, "Other camera unavailable", Toast.LENGTH_SHORT).show()
+        }
+    }
 }
 
 @Composable
@@ -247,7 +285,12 @@ fun ControlPanel(
     onRequestNotification: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestAudio: () -> Unit,
-    onShowCamera: () -> Unit = {}
+    onShowCamera: () -> Unit = {},
+    showInlinePreview: Boolean = false,
+    onToggleInlinePreview: () -> Unit = {},
+    onAttachPreview: (CameraPreview.SurfaceProvider) -> Unit = {},
+    onDetachPreview: (CameraPreview.SurfaceProvider) -> Unit = {},
+    onSwitchCamera: () -> Unit = {}
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -259,7 +302,8 @@ fun ControlPanel(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp, 100.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 100.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text("Face Matcher", style = MaterialTheme.typography.headlineMedium)
@@ -341,6 +385,25 @@ fun ControlPanel(
         ) {
             Text("Delete all saved faces")
         }
+
+        OutlinedButton(
+            onClick = onToggleInlinePreview,
+            enabled = isRunning,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (showInlinePreview) "Hide camera preview" else "Toggle camera preview")
+        }
+
+        if (showInlinePreview && isRunning) {
+            CameraPreviewBox(
+                onAttach = onAttachPreview,
+                onDetach = onDetachPreview,
+                onSwitchCamera = onSwitchCamera,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(4f / 3f)
+            )
+        }
     }
 
     if (showClearDialog) {
@@ -395,16 +458,19 @@ fun ControlPanel(
 @Composable
 fun CameraFeedScreen(
     onAttach: (CameraPreview.SurfaceProvider) -> Unit,
-    onDetach: () -> Unit,
+    onDetach: (CameraPreview.SurfaceProvider) -> Unit,
+    onSwitchCamera: () -> Unit,
     onClose: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { ctx ->
-                PreviewView(ctx).also { onAttach(it.surfaceProvider) }
-            },
+        CameraPreviewBox(
+            onAttach = onAttach,
+            onDetach = onDetach,
+            onSwitchCamera = onSwitchCamera,
             modifier = Modifier.fillMaxSize(),
-            onRelease = { onDetach() }
+            switchButtonAlignment = Alignment.TopStart,
+            switchButtonTopPadding = 50.dp,
+            scaleType = PreviewView.ScaleType.FILL_CENTER
         )
         IconButton(
             onClick = onClose,
@@ -415,6 +481,45 @@ fun CameraFeedScreen(
             Icon(
                 painter = painterResource(android.R.drawable.ic_menu_close_clear_cancel),
                 contentDescription = "Close",
+                tint = Color.White
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraPreviewBox(
+    onAttach: (CameraPreview.SurfaceProvider) -> Unit,
+    onDetach: (CameraPreview.SurfaceProvider) -> Unit,
+    onSwitchCamera: () -> Unit,
+    modifier: Modifier,
+    switchButtonAlignment: Alignment = Alignment.TopEnd,
+    switchButtonTopPadding: Dp = 8.dp,
+    scaleType: PreviewView.ScaleType = PreviewView.ScaleType.FIT_CENTER
+) {
+    Box(modifier = modifier) {
+        AndroidView(
+            factory = { ctx ->
+                PreviewView(ctx).also {
+                    it.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    it.scaleType = scaleType
+                    it.setBackgroundColor(android.graphics.Color.BLACK)
+                    onAttach(it.surfaceProvider)
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = { onDetach(it.surfaceProvider) }
+        )
+        IconButton(
+            onClick = onSwitchCamera,
+            modifier = Modifier
+                .align(switchButtonAlignment)
+                .padding(start = 8.dp, end = 8.dp, top = switchButtonTopPadding)
+                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_switch_camera),
+                contentDescription = "Switch camera",
                 tint = Color.White
             )
         }

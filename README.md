@@ -4,7 +4,7 @@ Runs in the background on Android XR glasses. When a familiar face appears in yo
 
 ## How it works
 
-The app runs as a background service. There is no camera preview — you see the world directly through the glasses. Two pipelines run simultaneously:
+The app runs as a background service. While detection is active, the control panel can show an inline camera preview or a full-screen camera feed. Both views have a control to switch between the front and rear cameras. Two pipelines run simultaneously:
 
 - **Camera** — detects and recognises faces continuously, showing a name overlay when a saved face is seen
 - **Microphone** — listens for introductions and automatically saves the face in frame when a name is detected
@@ -82,3 +82,4 @@ adb shell appops set com.example.facematcher SYSTEM_ALERT_WINDOW allow
 3. Look at someone as they say their name — it is saved automatically
 4. Next time that person appears, their name floats in your field of view
 5. To add a face manually, open the app while looking at the person and tap **Remember this face…**
+6. Tap **Toggle camera preview** to show or hide the camera feed below the controls, or **View camera feed** for a full-screen view. Use the camera switch icon in either view to change lenses.
