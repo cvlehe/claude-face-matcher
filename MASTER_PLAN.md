@@ -48,14 +48,15 @@ Tasks are ordered by dependency. Each task is complete only when its acceptance 
 - [x] 2. Define the session lifecycle and visible status
 - [ ] 3. Make camera observations reliable
 - [ ] 4. Validate and calibrate face matching
-- [ ] 5. Make speech recognition available without Gemini
-- [ ] 6. Build a bounded, resilient listening strategy
-- [ ] 7. Extract names conservatively
-- [ ] 8. Associate each introduction with the correct face
-- [ ] 9. Persist and manage identities safely
-- [ ] 10. Present recognition clearly on the phone
-- [ ] 11. Protect privacy and make corrections easy
-- [ ] 12. Verify the complete phone experience and set a release gate
+- [ ] 5. Add a spoken-name toggle
+- [ ] 6. Make speech recognition available without Gemini
+- [ ] 7. Build a bounded, resilient listening strategy
+- [ ] 8. Extract names conservatively
+- [ ] 9. Associate each introduction with the correct face
+- [ ] 10. Persist and manage identities safely
+- [ ] 11. Present recognition clearly on the phone
+- [ ] 12. Protect privacy and make corrections easy
+- [ ] 13. Verify the complete phone experience and set a release gate
 
 When a task's **Done when** condition is met, change its checkbox to `[x]` in the same commit as the completed work and push that commit to GitHub. Leave unfinished tasks unchecked. The checklist is the source of truth for progress; the sections below contain the requirements and completion checks.
 
@@ -87,49 +88,55 @@ Check the bundled model's input shape, channel order, normalization, and output 
 
 **Done when:** Matching behavior and its measured error rates are documented, and the threshold is supported by test data rather than a hard-coded guess.
 
-### 5. Make speech recognition available without Gemini
+### 5. Add a spoken-name toggle
+
+Add a persistent **Speak recognized names** toggle to the phone controls. When enabled, say a recognized person's name aloud with text-to-speech at the same time as the visual name toast or badge. Speak once per appearance after a stable match, and avoid repeated announcements from consecutive camera frames. When disabled, keep the visual alert and make no spoken announcement. Handle unavailable text-to-speech and audio interruptions visibly without blocking recognition. Keep speech output behind a replaceable presenter so a future glasses version can route it to the glasses.
+
+**Done when:** On a phone, a recognized face produces both the visual alert and one audible name with the toggle on; the toggle survives an app restart; turning it off leaves the visual alert working and produces no spoken name.
+
+### 6. Make speech recognition available without Gemini
 
 Add the required Android speech-service manifest visibility and decouple direct introduction parsing from the Gemini API key. Prefer on-device speech recognition when available. If the device cannot provide the selected speech engine, show that limitation and keep manual enrollment usable. Do not label the microphone pipeline active when it is not receiving results.
 
 **Done when:** Direct phrases produce transcripts on a supported phone without a Gemini key, and an unavailable recognizer yields a visible, actionable state.
 
-### 6. Build a bounded, resilient listening strategy
+### 7. Build a bounded, resilient listening strategy
 
 Replace the unbounded restart loop with a strategy appropriate to the chosen speech engine. Coordinate listening with a stable unknown-face candidate, allow enough lead-in to catch short introductions, and stop or suspend listening when it is unnecessary. Handle recognizer busy, silence, timeout, permission loss, and service restart with bounded retries. Measure battery use during a realistic active session.
 
 **Done when:** Introductions are captured reliably during an active session, the listener recovers from ordinary errors, and battery behavior is measured and documented.
 
-### 7. Extract names conservatively
+### 8. Extract names conservatively
 
 Parse common direct introductions and short answers to a recent name question. Use word boundaries, time-limited question context, name validation, and deduplication. Reject ordinary expressions that resemble names, such as “I'm fine,” and avoid treating unrelated later speech as an answer. Keep optional language-model assistance behind an interface with explicit user consent if it sends transcripts off-device.
 
 **Done when:** A table of positive and negative transcript examples passes, including variants, punctuation, false triggers, and split recognition sessions.
 
-### 8. Associate each introduction with the correct face
+### 9. Associate each introduction with the correct face
 
 Use timestamps and face tracks to join speech events to camera observations. Auto-enroll only when one eligible unknown face is stable throughout the association window. Do not enroll a recognized face under a new name. For multiple faces, uncertain matches, or a person leaving frame mid-introduction, present a confirmation or defer enrollment. Store more than one good embedding for a person if evaluation shows that it improves recognition.
 
 **Done when:** Tests with one face, multiple faces, no face, a known face, and a speaker outside the frame never silently save a name to an ambiguous face.
 
-### 9. Persist and manage identities safely
+### 10. Persist and manage identities safely
 
 Replace or harden the JSON store so writes are atomic and data can be migrated across app versions. Define a `Person` identity with editable name and one or more embeddings. Add list, rename, delete-one, delete-all, and manual-add flows. Keep the data in app-private storage, encrypt it at rest if the selected storage design supports that reliably, and explicitly exclude face data from automatic cloud backup unless the user opts in to a designed backup feature.
 
 **Done when:** Saved people survive process and device restarts, edits are reflected in recognition, deletion removes the intended data, and interrupted writes do not erase the collection.
 
-### 10. Present recognition clearly on the phone
+### 11. Present recognition clearly on the phone
 
 Replace the current large fixed overlay with a compact badge. Show it only after a stable match, once per new appearance, with a sensible timeout. Handle two recognized people without implying which name belongs to an untracked face. Keep the badge usable over other apps when overlay permission is granted; provide an in-app fallback when it is not.
 
 **Done when:** The user can read the name at a glance and repeated frames do not produce repeated alerts.
 
-### 11. Protect privacy and make corrections easy
+### 12. Protect privacy and make corrections easy
 
 Explain camera, microphone, and optional network use during onboarding. Keep capture visibly active through the foreground notification. Remove raw transcripts, names, embeddings, and API credentials from debug logging. Add a straightforward way to correct an incorrect association immediately after enrollment or recognition. Verify that Stop releases camera and microphone access.
 
 **Done when:** A user can tell when sensing is active, can correct mistakes, and can delete the stored identity data; logs and backups do not inadvertently expose it.
 
-### 12. Verify the complete phone experience and set a release gate
+### 13. Verify the complete phone experience and set a release gate
 
 Test the flow across fresh install, permission denial and later grant, direct introduction, contextual reply, reappearance after restart, multiple people, poor lighting, camera interruption, speech errors, and deletion. Run a small consented field pilot. Record correct enrollments, wrong enrollments, correct recognition alerts, wrong-name alerts, missed recognitions, latency, and battery use. Set explicit acceptable limits from those results before declaring the phone version ready.
 

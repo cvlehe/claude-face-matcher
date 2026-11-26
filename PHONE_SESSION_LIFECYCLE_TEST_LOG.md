@@ -17,4 +17,4 @@
 | Notification Stop path | Pass with method note | The notification reported one action. The same private `STOP_SESSION` intent used by its PendingIntent was invoked as the app UID; the UI showed Stopped, camera access ended, and the service was removed while the activity remained visible. The notification button itself was not tapped in the shade. |
 | Service interruption | Pass | Permission revocation terminated the process during an active session. The service did not restart automatically, and the reopened app showed Stopped. |
 
-Speech availability remains limited by the current Gemini-key gate. The UI reports that limitation when there is no key; removing the gate and validating direct recognition without a key are task 5.
+Speech availability remains limited by the current Gemini-key gate. The UI reports that limitation when there is no key; removing the gate and validating direct recognition without a key are task 6.
