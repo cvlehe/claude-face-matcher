@@ -4,7 +4,9 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Binder
@@ -28,12 +30,14 @@ import java.util.concurrent.Executors
 class FaceDetectionService : LifecycleService() {
 
     companion object {
+        const val ACTION_START = "com.example.facematcher.START_SESSION"
+        const val ACTION_STOP = "com.example.facematcher.STOP_SESSION"
         private const val NOTIFICATION_ID = 101
         private const val CHANNEL_ID = "face_detection"
         private const val OVERLAY_HIDE_DELAY_MS = 3000L
         private const val RECOGNITION_COOLDOWN_MS = 4000L
 
-        /** True while the service is alive; used by Activity to decide whether to bind. */
+        /** True only while an explicitly started session exists in this process. */
         var isRunning = false
             private set
     }
@@ -58,6 +62,11 @@ class FaceDetectionService : LifecycleService() {
     private var activeCameraSelector: CameraSelector? = null
     private var activeLensFacing: Int? = null
     private var cameraStarting = false
+    private var sessionStarted = false
+    private var generation = 0
+    var sessionStatus = SessionStatus()
+        private set
+    var onSessionStatusChanged: ((SessionStatus) -> Unit)? = null
 
     private var overlayView: TextView? = null
     private val recentRecognitions = mutableMapOf<String, Long>()
@@ -72,32 +81,98 @@ class FaceDetectionService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        isRunning = true
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         faceStorage = FaceStorage(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
         faceRecognizer = try { FaceRecognizer(this) } catch (_: Exception) { null }
         if (BuildConfig.GEMINI_API_KEY.isNotBlank()) {
-            nameDetector = NameDetector(this, BuildConfig.GEMINI_API_KEY) { name ->
+            nameDetector = NameDetector(this, BuildConfig.GEMINI_API_KEY, { name ->
                 val embedding = lastFaceResults
                     .maxByOrNull { it.bbox.width() * it.bbox.height() }
                     ?.embedding ?: return@NameDetector
                 faceStorage.addFace(name, embedding)
                 showOverlay("Remembered: $name")
+            }) { listening, detail ->
+                if (sessionStarted) updateStatus(sessionStatus.copy(
+                    microphone = if (listening) "Active" else "Available",
+                    speech = detail))
             }
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        startForeground(
-            NOTIFICATION_ID, buildNotification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        )
+        when (intent?.action) {
+            ACTION_STOP -> { stopSession(); return START_NOT_STICKY }
+            ACTION_START -> if (!sessionStarted) startSession()
+            else -> stopSelf(startId)
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun updateStatus(status: SessionStatus) {
+        sessionStatus = status
+        onSessionStatusChanged?.invoke(status)
+        if (sessionStarted) {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(NOTIFICATION_ID, buildNotification())
+        }
+    }
+
+    private fun startSession() {
+        val cameraGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val audioGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!cameraGranted || !audioGranted) {
+            updateStatus(SessionStatus(SessionStatus.Phase.UNAVAILABLE,
+                if (cameraGranted) "Available" else "Permission needed",
+                if (audioGranted) "Available" else "Permission needed", "Off"))
+            stopSelf()
+            return
+        }
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } catch (_: Exception) {
+            updateStatus(SessionStatus(SessionStatus.Phase.UNAVAILABLE, "Unavailable", "Unavailable", "Off"))
+            stopSelf()
+            return
+        }
+        sessionStarted = true
+        isRunning = true
+        generation++
+        updateStatus(SessionStatus(SessionStatus.Phase.STARTING, "Starting", "Available", "Starting"))
         startCamera()
-        nameDetector?.start()
-        nameDetector?.resume()
-        return START_STICKY
+        if (nameDetector == null) {
+            updateStatus(sessionStatus.copy(speech = "Unavailable (Gemini key required by current build)"))
+        } else {
+            if (nameDetector?.start() == true) {
+                updateStatus(sessionStatus.copy(speech = "Starting"))
+                nameDetector?.resume()
+            } else {
+                updateStatus(sessionStatus.copy(speech = "Recognizer unavailable"))
+            }
+        }
+    }
+
+    private fun stopSession() {
+        if (!sessionStarted) { stopSelf(); return }
+        sessionStarted = false
+        isRunning = false
+        generation++
+        nameDetector?.stop()
+        cameraProvider?.unbindAll()
+        imageAnalysis?.clearAnalyzer()
+        cameraProvider = null
+        imageAnalysis = null
+        cameraPreview = null
+        activeCameraSelector = null
+        cameraStarting = false
+        lastFaceResults = emptyList()
+        mainHandler.removeCallbacks(hideOverlayRunnable)
+        removeOverlay()
+        updateStatus(SessionStatus())
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -117,31 +192,48 @@ class FaceDetectionService : LifecycleService() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val stop = PendingIntent.getService(this, 1,
+            Intent(this, FaceDetectionService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Face Matcher")
-            .setContentText("Watching for familiar faces…")
+            .setContentText("Camera: ${sessionStatus.camera} · Speech: ${sessionStatus.speech}")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(tap)
             .setOngoing(true)
+            .addAction(android.R.drawable.ic_media_pause, "Stop", stop)
             .build()
     }
 
     private fun startCamera() {
         if (cameraStarting || cameraPreview != null) return
-        val recognizer = faceRecognizer ?: return
+        val recognizer = faceRecognizer ?: run {
+            updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "Model unavailable"))
+            return
+        }
         cameraStarting = true
-        val future = ProcessCameraProvider.getInstance(this)
+        val requestedGeneration = generation
+        val future = try { ProcessCameraProvider.getInstance(this) } catch (_: Exception) {
+            cameraStarting = false
+            updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "Unavailable"))
+            return
+        }
         future.addListener({
             try {
+                if (!sessionStarted || generation != requestedGeneration) return@addListener
                 val provider = future.get()
-                val selector = cameraSelector(provider) ?: return@addListener
+                val selector = cameraSelector(provider) ?: run {
+                    updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "No camera"))
+                    return@addListener
+                }
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also { ia ->
                         ia.setAnalyzer(cameraExecutor, FaceAnalyzer(recognizer, faceStorage) { results ->
-                            lastFaceResults = results
                             mainHandler.post {
+                                if (!sessionStarted || generation != requestedGeneration) return@post
+                                lastFaceResults = results
                                 onFaceResultsChanged?.invoke(results)
                                 handleRecognitions(results)
                             }
@@ -161,7 +253,9 @@ class FaceDetectionService : LifecycleService() {
                     CameraSelector.DEFAULT_FRONT_CAMERA -> CameraSelector.LENS_FACING_FRONT
                     else -> null
                 }
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.ACTIVE, camera = "Active"))
             } catch (_: Exception) {
+                updateStatus(sessionStatus.copy(phase = SessionStatus.Phase.UNAVAILABLE, camera = "Unavailable"))
             } finally {
                 cameraStarting = false
             }
@@ -270,10 +364,10 @@ class FaceDetectionService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        if (sessionStarted) stopSession()
         super.onDestroy()
         isRunning = false
         mainHandler.removeCallbacks(hideOverlayRunnable)
-        nameDetector?.stop()
         cameraProvider?.unbindAll()
         cameraExecutor.shutdown()
         faceRecognizer?.close()

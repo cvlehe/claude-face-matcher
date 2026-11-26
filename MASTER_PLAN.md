@@ -45,7 +45,7 @@ Tasks are ordered by dependency. Each task is complete only when its acceptance 
 ### Progress checklist
 
 - [x] 1. Establish a runnable baseline
-- [ ] 2. Define the session lifecycle and visible status
+- [x] 2. Define the session lifecycle and visible status
 - [ ] 3. Make camera observations reliable
 - [ ] 4. Validate and calibrate face matching
 - [ ] 5. Make speech recognition available without Gemini
@@ -72,6 +72,8 @@ Baseline result: [Phone baseline test log](PHONE_BASELINE_TEST_LOG.md).
 Make Start and Stop authoritative across the activity, foreground service, notification, and process restarts. Start only from a user-visible action allowed by Android. Report camera, microphone, and speech availability separately. Provide a Stop action in the notification and release resources promptly. Avoid duplicate camera bindings or recognizer sessions after repeated starts.
 
 **Done when:** Starting, leaving the app, returning, stopping, permission revocation, and service interruption all produce accurate UI and resource state.
+
+Verification: [Step 2 phone test log](PHONE_SESSION_LIFECYCLE_TEST_LOG.md).
 
 ### 3. Make camera observations reliable
 

@@ -31,7 +31,8 @@ import kotlin.properties.Delegates
 class NameDetector(
     private val context: Context,
     private val geminiApiKey: String,
-    private val onNameDetected: (String) -> Unit
+    private val onNameDetected: (String) -> Unit,
+    private val onListeningChanged: (Boolean, String) -> Unit = { _, _ -> }
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
@@ -58,9 +59,10 @@ class NameDetector(
         RegexOption.IGNORE_CASE
     )
 
-    fun start() {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) return
+    fun start(): Boolean {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) return false
         isActive = true
+        return true
     }
 
     fun resume() {
@@ -72,6 +74,7 @@ class NameDetector(
     fun pause() {
         isListening = false
         speechRecognizer?.stopListening()
+        onListeningChanged(false, "Off")
     }
 
     private fun destroyRecognizer() {
@@ -94,6 +97,7 @@ class NameDetector(
     }
 
     private fun listen(recreate: Boolean = false) {
+        if (!isActive || !isListening) return
         detectedThisSession = false
         if (recreate || speechRecognizer == null) {
             speechRecognizer?.destroy()
@@ -110,7 +114,7 @@ class NameDetector(
             val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.joinToString(". ").orEmpty()
             if (text.isNotBlank()) processPhrase(text)
-            if (isListening) mainHandler.post { listen() }
+            if (isListening) mainHandler.post { if (isListening && isActive) listen() }
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
@@ -119,6 +123,11 @@ class NameDetector(
         }
 
         override fun onError(error: Int) {
+            onListeningChanged(false, when (error) {
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permission needed"
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "Language unavailable"
+                else -> "Retrying"
+            })
             val recreate: Boolean
             val retryDelayMs: Long
             when (error) {
@@ -128,11 +137,13 @@ class NameDetector(
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> { recreate = true; retryDelayMs = 1000L }
                 else -> { recreate = true; retryDelayMs = 1000L }
             }
-            if (isListening) mainHandler.postDelayed({ listen(recreate) }, retryDelayMs)
+            if (isListening) mainHandler.postDelayed({
+                if (isListening && isActive) listen(recreate)
+            }, retryDelayMs)
         }
 
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onEndOfSpeech() {}
+        override fun onReadyForSpeech(params: Bundle?) { onListeningChanged(true, "Listening") }
+        override fun onEndOfSpeech() { onListeningChanged(false, "Processing") }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}

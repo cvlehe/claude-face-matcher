@@ -65,10 +65,12 @@ import androidx.core.content.ContextCompat
 class MainActivity : ComponentActivity() {
 
     private var isBound = false
+    private var bindRequested = false
     private var boundService: FaceDetectionService? = null
     private var previewSurfaceProvider: CameraPreview.SurfaceProvider? = null
 
     private val isServiceRunning = mutableStateOf(false)
+    private val sessionStatus = mutableStateOf(SessionStatus())
     private val faceResults = mutableStateListOf<FaceAnalyzer.FaceResult>()
     private val hasCameraPermission = mutableStateOf(false)
     private val hasOverlayPermission = mutableStateOf(false)
@@ -81,8 +83,17 @@ class MainActivity : ComponentActivity() {
             val svc = (binder as FaceDetectionService.LocalBinder).getService()
             boundService = svc
             isBound = true
-            isServiceRunning.value = true
+            isServiceRunning.value = FaceDetectionService.isRunning
+            sessionStatus.value = svc.sessionStatus
             savedFaceCount.intValue = svc.faceStorage.size()
+            svc.onSessionStatusChanged = { status ->
+                sessionStatus.value = status
+                isServiceRunning.value = status.phase != SessionStatus.Phase.STOPPED
+                if (status.phase == SessionStatus.Phase.STOPPED) {
+                    faceResults.clear()
+                    window.decorView.post { if (!FaceDetectionService.isRunning) releaseBinding() }
+                }
+            }
             previewSurfaceProvider?.let(svc::attachPreviewSurface)
             svc.onFaceResultsChanged = { results ->
                 faceResults.clear()
@@ -93,8 +104,12 @@ class MainActivity : ComponentActivity() {
 
         override fun onServiceDisconnected(name: ComponentName) {
             boundService?.onFaceResultsChanged = null
+            boundService?.onSessionStatusChanged = null
             boundService = null
             isBound = false
+            isServiceRunning.value = false
+            sessionStatus.value = SessionStatus()
+            faceResults.clear()
         }
     }
 
@@ -128,6 +143,7 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     ControlPanel(
                         isRunning = isServiceRunning.value,
+                        sessionStatus = sessionStatus.value,
                         hasCameraPermission = hasCameraPermission.value,
                         hasOverlayPermission = hasOverlayPermission.value,
                         hasNotificationPermission = hasNotificationPermission.value,
@@ -195,23 +211,34 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         refreshPermissions()
-        if (FaceDetectionService.isRunning && !isBound) {
-            bindService(Intent(this, FaceDetectionService::class.java), serviceConnection, BIND_AUTO_CREATE)
+        isServiceRunning.value = FaceDetectionService.isRunning
+        if (!isServiceRunning.value) sessionStatus.value = SessionStatus()
+        if (FaceDetectionService.isRunning && !bindRequested) {
+            bindRequested = bindService(Intent(this, FaceDetectionService::class.java), serviceConnection, 0)
         }
     }
 
     override fun onResume() {
         super.onResume()
         // Re-check after returning from system Settings
-        hasOverlayPermission.value = Settings.canDrawOverlays(this)
+        refreshPermissions()
+        if (isServiceRunning.value && (!hasCameraPermission.value || !hasAudioPermission.value)) {
+            stopDetection()
+        }
     }
 
     override fun onStop() {
         super.onStop()
-        if (isBound) {
+        releaseBinding()
+    }
+
+    private fun releaseBinding() {
+        if (bindRequested) {
             previewSurfaceProvider?.let { boundService?.detachPreviewSurface(it) }
             boundService?.onFaceResultsChanged = null
+            boundService?.onSessionStatusChanged = null
             unbindService(serviceConnection)
+            bindRequested = false
             isBound = false
             boundService = null
         }
@@ -233,21 +260,26 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startDetection() {
-        val intent = Intent(this, FaceDetectionService::class.java)
-        startForegroundService(intent)
-        if (!isBound) bindService(intent, serviceConnection, BIND_AUTO_CREATE)
-        isServiceRunning.value = true
+        refreshPermissions()
+        if (!hasCameraPermission.value || !hasAudioPermission.value) return
+        val intent = Intent(this, FaceDetectionService::class.java).setAction(FaceDetectionService.ACTION_START)
+        try {
+            startForegroundService(intent)
+            if (!bindRequested) bindRequested = bindService(
+                Intent(this, FaceDetectionService::class.java), serviceConnection, BIND_AUTO_CREATE)
+            sessionStatus.value = SessionStatus(SessionStatus.Phase.STARTING, "Starting", "Available", "Starting")
+            isServiceRunning.value = true
+        } catch (_: Exception) {
+            sessionStatus.value = SessionStatus(SessionStatus.Phase.UNAVAILABLE, "Unavailable", "Unavailable", "Off")
+            isServiceRunning.value = false
+        }
     }
 
     private fun stopDetection() {
-        if (isBound) {
-            boundService?.onFaceResultsChanged = null
-            unbindService(serviceConnection)
-            isBound = false
-            boundService = null
-        }
-        stopService(Intent(this, FaceDetectionService::class.java))
+        releaseBinding()
+        startService(Intent(this, FaceDetectionService::class.java).setAction(FaceDetectionService.ACTION_STOP))
         isServiceRunning.value = false
+        sessionStatus.value = SessionStatus()
         faceResults.clear()
         savedFaceCount.intValue = FaceStorage(this).size()
     }
@@ -272,6 +304,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ControlPanel(
     isRunning: Boolean,
+    sessionStatus: SessionStatus = SessionStatus(),
     hasCameraPermission: Boolean,
     hasOverlayPermission: Boolean,
     hasNotificationPermission: Boolean,
@@ -324,10 +357,18 @@ fun ControlPanel(
         }
 
         Text(
-            text = if (isRunning) "Active — watching for faces" else "Stopped",
-            color = if (isRunning) Color(0xFF4CAF50) else Color.Gray,
+            text = when (sessionStatus.phase) {
+                SessionStatus.Phase.STOPPED -> "Stopped"
+                SessionStatus.Phase.STARTING -> "Starting session…"
+                SessionStatus.Phase.ACTIVE -> "Active — watching for faces"
+                SessionStatus.Phase.UNAVAILABLE -> "Session unavailable"
+            },
+            color = if (sessionStatus.phase == SessionStatus.Phase.ACTIVE) Color(0xFF4CAF50) else Color.Gray,
             style = MaterialTheme.typography.bodyLarge
         )
+        Text("Camera: ${sessionStatus.camera}", fontSize = 14.sp)
+        Text("Microphone: ${sessionStatus.microphone}", fontSize = 14.sp)
+        Text("Speech: ${sessionStatus.speech}", fontSize = 14.sp)
         Text("Saved faces: $savedFaceCount", fontSize = 14.sp, color = Color.Gray)
 
         if (isRunning) {
